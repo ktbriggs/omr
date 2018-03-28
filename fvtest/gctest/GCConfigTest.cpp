@@ -40,17 +40,24 @@
 #define STRINGFY(str) DO_STRINGFY(str)
 #define DO_STRINGFY(str) #str
 
-const char *gcTests[] = {"fvtest/gctest/configuration/sample_GC_config.xml",
-                                "fvtest/gctest/configuration/test_system_gc.xml",
-                                "fvtest/gctest/configuration/gencon_GC_config.xml",
-                                "fvtest/gctest/configuration/gencon_GC_backout_config.xml",
-                                "fvtest/gctest/configuration/scavenger_GC_config.xml",
-                                "fvtest/gctest/configuration/scavenger_GC_backout_config.xml",
-                               	"fvtest/gctest/configuration/global_GC_config.xml",
-								"fvtest/gctest/configuration/optavgpause_GC_config.xml"};
+const char *gcTests[] = {
+		"fvtest/gctest/configuration/sample_GC_config.xml",
+		"fvtest/gctest/configuration/test_system_gc.xml",
+		"fvtest/gctest/configuration/gencon_GC_config.xml",
+		"fvtest/gctest/configuration/gencon_GC_backout_config.xml",
+		"fvtest/gctest/configuration/evacuator_small_GC_config.xml",
+		"fvtest/gctest/configuration/evacuator_large_GC_config.xml",
+		"fvtest/gctest/configuration/scavenger_GC_config.xml",
+		"fvtest/gctest/configuration/scavenger_GC_backout_config.xml",
+		"fvtest/gctest/configuration/global_GC_config.xml",
+		"fvtest/gctest/configuration/optavgpause_GC_config.xml"
+};
 
-const char *perfTests[] = {"perftest/gctest/configuration/21645_core.20150126.202455.11862202.0001.xml",
-								"perftest/gctest/configuration/24404_core.20140723.091737.5812.0002.xml"};
+const char *perfTests[] = {
+		"perftest/gctest/configuration/21645_core.20150126.202455.11862202.0001.xml",
+		"perftest/gctest/configuration/24404_core.20140723.091737.5812.0002.xml"
+};
+
 void
 GCConfigTest::SetUp()
 {
@@ -300,18 +307,8 @@ GCConfigTest::allocateHelper(const char *objName, uintptr_t size)
 	objEntry.name = objName;
 	objEntry.objPtr = NULL;
 
-	uint8_t objectAllocationModelSpace[sizeof(MM_ObjectAllocationModel)];
-	MM_ObjectAllocationModel *noGc = new(objectAllocationModelSpace)
-			MM_ObjectAllocationModel(env, size, MM_ObjectAllocationModel::selectObjectAllocationFlags(false, false, false, true));
-	objEntry.objPtr = OMR_GC_AllocateObject(exampleVM->_omrVMThread, noGc);
-
-	if (NULL == objEntry.objPtr) {
-		gcTestEnv->log("No free memory to allocate %s of size 0x%llx, GC start.\n", objName, size);
-		MM_ObjectAllocationModel *withGc = new(objectAllocationModelSpace)
-				MM_ObjectAllocationModel(env, size, MM_ObjectAllocationModel::selectObjectAllocationFlags(false, false, false, false));
-		objEntry.objPtr = OMR_GC_AllocateObject(exampleVM->_omrVMThread, withGc);
-	}
-
+	MM_ObjectAllocationModel  objectAllocationModel(env, size, MM_ObjectAllocationModel::selectObjectAllocationFlags(false, false, false, false));
+	objEntry.objPtr = OMR_GC_AllocateObject(exampleVM->_omrVMThread, &objectAllocationModel);
 	ObjectEntry *newEntry = NULL;
 	if (NULL != objEntry.objPtr) {
 		uintptr_t consumedSize = env->getExtensions()->objectModel.getConsumedSizeInBytesWithHeader(objEntry.objPtr);
