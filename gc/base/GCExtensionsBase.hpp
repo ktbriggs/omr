@@ -421,6 +421,7 @@ public:
 	bool scvTenureStrategyLookback; /**< Flag for enabling the Lookback scavenger tenure strategy. */
 	bool scvTenureStrategyHistory; /**< Flag for enabling the History scavenger tenure strategy. */
 	bool scavengerEnabled;
+	bool evacuatorEnabled;
 	bool scavengerRsoScanUnsafe;
 #if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	bool softwareEvacuateReadBarrier; /**< enable software read barrier instead of hardware guarded loads when running with CS */
@@ -832,6 +833,16 @@ public:
 	{
 #if defined(OMR_GC_MODRON_SCAVENGER)
 		return scavengerEnabled;
+#else
+		return false;
+#endif /* defined(OMR_GC_MODRON_SCAVENGER) */
+	}
+
+	MMINLINE bool
+	isEvacuatorEnabled()
+	{
+#if defined(OMR_GC_MODRON_SCAVENGER)
+		return scavengerEnabled && evacuatorEnabled;
 #else
 		return false;
 #endif /* defined(OMR_GC_MODRON_SCAVENGER) */
@@ -1356,6 +1367,7 @@ public:
 		, scvTenureStrategyLookback(true)
 		, scvTenureStrategyHistory(true)
 		, scavengerEnabled(false)
+		, evacuatorEnabled(false)
 #if defined(OMR_GC_CONCURRENT_SCAVENGER)
 		, softwareEvacuateReadBarrier(false)
 		, concurrentScavenger(false)

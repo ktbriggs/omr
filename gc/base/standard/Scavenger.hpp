@@ -37,6 +37,7 @@
 #include "CopyScanCacheList.hpp"
 #include "CopyScanCacheStandard.hpp"
 #include "CycleState.hpp"
+#include "EvacuatorController.hpp"
 #include "GCExtensionsBase.hpp"
 #if defined(OMR_GC_CONCURRENT_SCAVENGER)
 #include "MasterGCThread.hpp"
@@ -61,7 +62,7 @@ struct OMR_VM;
  * @todo Provide class documentation
  * @ingroup GC_Modron_Standard
  */
-class MM_Scavenger : public MM_Collector
+class MM_Scavenger : public MM_EvacuatorController
 {
 	/*
 	 * Data members
@@ -737,7 +738,7 @@ public:
 	virtual void heapReconfigured(MM_EnvironmentBase *env);
 
 	MM_Scavenger(MM_EnvironmentBase *env, MM_HeapRegionManager *regionManager) :
-		MM_Collector()
+		MM_EvacuatorController(env)
 		, _cli(env->getExtensions()->collectorLanguageInterface)
 		, _objectAlignmentInBytes(env->getObjectAlignmentInBytes())
 		, _isRememberedSetInOverflowAtTheBeginning(false)
@@ -757,6 +758,7 @@ public:
 		, _failedTenureThresholdReached(false)
 		, _countSinceForcingGlobalGC(0)
 		, _expandTenureOnFailedAllocate(true)
+		, _cachedSemiSpaceResizableFlag(true)
 		, _minTenureFailureSize(UDATA_MAX)
 		, _minSemiSpaceFailureSize(UDATA_MAX)
 		, _cycleState()
