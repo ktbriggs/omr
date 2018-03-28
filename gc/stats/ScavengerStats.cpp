@@ -96,6 +96,8 @@ MM_ScavengerStats::MM_ScavengerStats()
 	memset(_flipHistory, 0, sizeof(_flipHistory));
 	memset(_copy_distance_counts, 0, sizeof(_copy_distance_counts));
 	memset(_copy_cachesize_counts, 0, sizeof(_copy_cachesize_counts));
+	memset(_small_object_counts, 0, sizeof(_small_object_counts));
+	memset(_large_object_counts, 0, sizeof(_large_object_counts));
 }
 
 struct MM_ScavengerStats::FlipHistory*
@@ -194,4 +196,6 @@ MM_ScavengerStats::clear(bool firstIncrement)
 	_copy_cachesize_sum = 0;
 	memset(_copy_distance_counts, 0, sizeof(_copy_distance_counts));
 	memset(_copy_cachesize_counts, 0, sizeof(_copy_cachesize_counts));
+	memset(_small_object_counts, 0, sizeof(_small_object_counts));
+	memset(_large_object_counts, 0, sizeof(_large_object_counts));
 }
