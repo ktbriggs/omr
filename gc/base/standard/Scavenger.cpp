@@ -384,8 +384,10 @@ MM_Scavenger::masterSetupForGC(MM_EnvironmentStandard *env)
 	/* Clear the cycle gc statistics. Increment level stats will be cleared just prior to increment start. */
 	clearCycleGCStats(env);
 
-	/* invoke collector language interface callback */
-	_cli->scavenger_masterSetupForGC(env);
+	if (!_extensions->isEvacuatorEnabled()) {
+		/* invoke collector language interface callback */
+		_cli->scavenger_masterSetupForGC(env);
+	}
 
 	/* Allow expansion in the tenure area on failed promotions (but no resizing on the semispace) */
 	_expandTenureOnFailedAllocate = true;
@@ -402,7 +404,7 @@ MM_Scavenger::masterSetupForGC(MM_EnvironmentStandard *env)
 	_evacuateMemorySubSpace = _activeSubSpace->getMemorySubSpaceAllocate();
 	_survivorMemorySubSpace = _activeSubSpace->getMemorySubSpaceSurvivor();
 	_tenureMemorySubSpace = _activeSubSpace->getTenureMemorySubSpace();
-	
+
 	/* Accumulate pre-scavenge allocation statistics */
 	MM_HeapStats heapStatsSemiSpace;
 	MM_HeapStats heapStatsTenureSpace;
@@ -423,6 +425,10 @@ MM_Scavenger::masterSetupForGC(MM_EnvironmentStandard *env)
 	/* assume that value of RS Overflow flag will not be changed until scavengeRememberedSet() call, so handle it first */
 	_isRememberedSetInOverflowAtTheBeginning = isRememberedSetInOverflowState();
 	_extensions->rememberedSet.startProcessingSublist();
+
+	if (_extensions->isEvacuatorEnabled()) {
+		MM_EvacuatorController::masterSetupForGC(env);
+	}
 }
 
 void
@@ -464,13 +470,27 @@ void
 MM_Scavenger::scavenge(MM_EnvironmentBase *envBase)
 {
 	MM_EnvironmentStandard *env = MM_EnvironmentStandard::getEnvironment(envBase);
+	OMRPORT_ACCESS_FROM_ENVIRONMENT(env);
+
+	MM_CollectionStatisticsStandard *stats = (MM_CollectionStatisticsStandard *)env->_cycleState->_collectionStatistics;
+	stats->_startTime = omrtime_hires_clock();
+	switch (omrthread_get_process_times(&stats->_startProcessTimes)){
+	case -1: /* Error: Function un-implemented on architecture */
+	case -2: /* Error: getrusage() or GetProcessTimes() returned error value */
+		stats->_startProcessTimes._userTime = I_64_MAX;
+		stats->_startProcessTimes._systemTime = I_64_MAX;
+		break;
+	case  0:
+		break; /* Success */
+	default:
+		Assert_MM_unreachable();
+	}
 
 	if (!_extensions->isEvacuatorEnabled()) {
 #if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 #if defined(EVACUATOR_DEBUG)
 		if (_debugger.isDebugEnd()) {
 #endif /* defined(EVACUATOR_DEBUG) */
-		OMRPORT_ACCESS_FROM_ENVIRONMENT(envBase);
 			omrtty_printf("%5llu  0   :  gc start; survivor{%llx %llx} tenure{%llx %llx} evacuate{%llx %llx} projection:%llx\n", _extensions->scavengerStats._gcCount,
 					(uintptr_t)_survivorSpaceBase, (uintptr_t)_survivorSpaceTop, (uintptr_t)_extensions->_tenureBase, (uintptr_t)_extensions->_tenureBase + _extensions->_tenureSize,
 					(uintptr_t)_evacuateSpaceBase, (uintptr_t)_evacuateSpaceTop, (uintptr_t)_survivorSpaceTop - (uintptr_t)_survivorSpaceBase);
@@ -485,16 +505,22 @@ MM_Scavenger::scavenge(MM_EnvironmentBase *envBase)
 		Assert_MM_true(_scavengeCacheFreeList.areAllCachesReturned());
 		Assert_MM_true(0 == _cachedEntryCount);
 	} else {
-		uint8_t *heapLayout[][2] = {
-			{ (uint8_t *)_survivorSpaceBase, (uint8_t *)_survivorSpaceTop },
-			{ (uint8_t *)_extensions->_tenureBase, (uint8_t *)((uint8_t *)(_extensions->_tenureBase) + _extensions->_tenureSize) },
-			{ (uint8_t *)_evacuateSpaceBase, (uint8_t *)_evacuateSpaceTop }
-		};
-		MM_MemorySubSpace *memorySubspace[] = { _survivorMemorySubSpace, _tenureMemorySubSpace, _evacuateMemorySubSpace };
-		MM_EvacuatorController::prepareForEvacuation(env, heapLayout, memorySubspace);
 		MM_EvacuatorParallelTask evacuatorTask(env, _dispatcher, this, env->_cycleState);
 		_dispatcher->run(env, &evacuatorTask);
 	}
+
+	switch (omrthread_get_process_times(&stats->_endProcessTimes)) {
+	case -1: /* Error: Function un-implemented on architecture */
+	case -2: /* Error: getrusage() or GetProcessTimes() returned error value */
+		stats->_endProcessTimes._userTime = 0;
+		stats->_endProcessTimes._systemTime = 0;
+		break;
+	case  0:
+		break; /* Success */
+	default:
+		Assert_MM_unreachable();
+	}
+	stats->_endTime = omrtime_hires_clock();
 }
 
 void
@@ -2731,7 +2757,7 @@ MM_Scavenger::scavengeRememberedSetList(MM_EnvironmentStandard *env)
 						shouldBeRemembered |= _cli->scavenger_scavengeIndirectObjectSlots(env, objectPtr);
 					}
 				} else {
-					shouldBeRemembered = env->getEvacuator()->evacuateRememberedObjectReferents(objectPtr);
+					shouldBeRemembered |= env->getEvacuator()->evacuateRememberedObjectReferents(objectPtr);
 				}
 				if (shouldBeRemembered) {
 					/* We want to retain this object in the remembered set so clear the flag for removal. */
@@ -4513,23 +4539,8 @@ MM_Scavenger::calculateTiltRatio()
 void
 MM_Scavenger::reportGCIncrementStart(MM_EnvironmentStandard *env)
 {
-	OMRPORT_ACCESS_FROM_ENVIRONMENT(env);
 	MM_CollectionStatisticsStandard *stats = (MM_CollectionStatisticsStandard *)env->_cycleState->_collectionStatistics;
 	stats->collectCollectionStatistics(env, stats);
-	stats->_startTime = omrtime_hires_clock();
-
-	intptr_t rc = omrthread_get_process_times(&stats->_startProcessTimes);
-	switch (rc){
-	case -1: /* Error: Function un-implemented on architecture */
-	case -2: /* Error: getrusage() or GetProcessTimes() returned error value */
-		stats->_startProcessTimes._userTime = I_64_MAX;
-		stats->_startProcessTimes._systemTime = I_64_MAX;
-		break;
-	case  0:
-		break; /* Success */
-	default:
-		Assert_MM_unreachable();
-	}
 
 	TRIGGER_J9HOOK_MM_PRIVATE_GC_INCREMENT_START(
 		_extensions->privateHookInterface,
@@ -4542,24 +4553,8 @@ MM_Scavenger::reportGCIncrementStart(MM_EnvironmentStandard *env)
 void
 MM_Scavenger::reportGCIncrementEnd(MM_EnvironmentStandard *env)
 {
-	OMRPORT_ACCESS_FROM_ENVIRONMENT(env);
 	MM_CollectionStatisticsStandard *stats = (MM_CollectionStatisticsStandard *)env->_cycleState->_collectionStatistics;
 	stats->collectCollectionStatistics(env, stats);
-
-	intptr_t rc = omrthread_get_process_times(&stats->_endProcessTimes);
-	switch (rc){
-	case -1: /* Error: Function un-implemented on architecture */
-	case -2: /* Error: getrusage() or GetProcessTimes() returned error value */
-		stats->_endProcessTimes._userTime = 0;
-		stats->_endProcessTimes._systemTime = 0;
-		break;
-	case  0:
-		break; /* Success */
-	default:
-		Assert_MM_unreachable();
-	}
-
-	stats->_endTime = omrtime_hires_clock();
 
 	TRIGGER_J9HOOK_MM_PRIVATE_GC_INCREMENT_END(
 		_extensions->privateHookInterface,

@@ -266,6 +266,30 @@ private:
 protected:
 public:
 	/**
+	 * Basic array constructor obviates need for stdlibc++ linkage in gc component libraries. Array
+	 * is allocated from forge as contiguous block sized to contain requested number of elements and
+	 * must be freed using MM_Forge::free() when no longer needed.
+	 *
+	 * @param base a pointer to allocated space that will contain the instance array
+	 * @param count the number of aray elements to instantiate
+	 * @return a pointer to instantiated array
+	 */
+	static MM_EvacuatorWhitelist *
+	newInstanceArray(MM_Forge *forge, void *base, uintptr_t count)
+	{
+		MM_EvacuatorWhitelist *whitelist = (MM_EvacuatorWhitelist *)forge->allocate(sizeof(MM_EvacuatorWhitelist) * count, OMR::GC::AllocationCategory::FIXED, OMR_GET_CALLSITE());
+		if (NULL != whitelist) {
+			for (uintptr_t i = 0; i < count; i += 1) {
+				MM_EvacuatorWhitelist *list = new(whitelist + i) MM_EvacuatorWhitelist();
+				if (NULL == list) {
+					return NULL;
+				}
+			}
+		}
+		return whitelist;
+	}
+
+	/**
 	 * Returns the number of whitespace elements in the list
 	 */
 	MMINLINE uintptr_t getSize() { return _count; }

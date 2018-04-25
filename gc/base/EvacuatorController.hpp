@@ -91,7 +91,7 @@ private:
 	uint64_t _epochTimestamp;							/* start of current epoch */
 
 	uint8_t *_heapLayout[3][2];							/* generational heap region bounds */
-	MM_MemorySubSpace *_memorySubspace[3];				/* memory subspaces for heap regions */
+	MM_MemorySubSpace *_memorySubspace[3];				/* pointers to memory subspaces for heap regions */
 	MM_Evacuator *_evacuatorTask[max_evacuator_tasks];	/* controller's view of evacuators */
 
 	const double _limitProductionRate;
@@ -100,15 +100,28 @@ protected:
 #if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 	uint64_t _collectorStartTime;						/* collector startup time */
 #endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
+	const uintptr_t _objectAlignmentInBytes;			/* cached object alignment from GC_ObjectModelBase */
 	volatile uint64_t _copiedBytes[2];					/* running total aggregate volume of copy accumulated in current gc cycle */
 	volatile uint64_t _scannedBytes;					/* running total aggregate volume of copy scanned in current gc cycle */
 	volatile uint64_t _finalDiscardedBytes;				/* sum of final whitespace bytes discarded during gc cycle for all evacuators */
 	volatile uint64_t _finalFlushedBytes;				/* sum of final whitespace bytes flushed at end of gc cycle for all evacuators */
 	uint64_t _finalEvacuatedBytes;						/* total number of bytes evacuated to survivor/tenure regions during gc cycle */
 	uint64_t _globalTenureFlushedBytes;					/* sum of tenure whitespace bytes flushed before global collections and shutdown */
-	MM_GCExtensionsBase *_extensions;					/* points to GC extensions */
-	MM_ParallelDispatcher *_dispatcher;					/* dispatches evacuator tasks */
+
+	/* fields pulled down from MM_Scavenger ... */
+
+	MM_GCExtensionsBase * const _extensions;			/* points to GC extensions */
+	MM_ParallelDispatcher * const _dispatcher;			/* dispatches evacuator tasks */
 	uintptr_t _tenureMask;								/* tenure mask for selecting whether evacuated object should be tenured */
+	MM_MemorySubSpaceSemiSpace *_activeSubSpace; 		/* top level new subspace subject to GC */
+	MM_MemorySubSpace *_evacuateMemorySubSpace; 		/* cached pointer to evacuate subspace within active subspace */
+	MM_MemorySubSpace *_survivorMemorySubSpace; 		/* cached pointer to survivor subspace within active subspace */
+	MM_MemorySubSpace *_tenureMemorySubSpace;			/* cached pointer to tenure subspace */
+	void *_evacuateSpaceBase, *_evacuateSpaceTop;		/* cached base and top heap pointers within evacuate subspace */
+	void *_survivorSpaceBase, *_survivorSpaceTop;		/* cached base and top heap pointers within survivor subspace */
+
+	/* ... and history is exposed to MM_Scavenger for end cycle tracing */
+
 	MM_EvacuatorHistory _history;						/* epochal record per gc cycle */
 
 public:
@@ -162,6 +175,12 @@ private:
 		return workerIndex;
 	}
 
+	/* test for object alignment */
+	bool isObjectAligned(void *pointer) { return 0 == ((uintptr_t)pointer & (_objectAlignmentInBytes - 1)); }
+
+	/* align to object size */
+	uintptr_t alignToObjectSize(uintptr_t size) { return _extensions->objectModel.adjustSizeInBytes(size); }
+
 protected:
 	virtual bool initialize(MM_EnvironmentBase *env);
 	virtual void tearDown(MM_EnvironmentBase *env);
@@ -178,10 +197,9 @@ protected:
 	 * Called to initiate an evacuation and inform controller of number of GC threads that will participate (as
 	 * evacuators) and heap layout.
 	 *
-	 * @param heapLayout lower and upper address bounds for each heap region
-	 * @param memorySubspace pointers to memory subspaces involved in colleciton cycle
+	 * @param env environment for calling (master) thread
 	 */
-	void prepareForEvacuation(MM_EnvironmentBase *env, uint8_t *heapLayout[][2], MM_MemorySubSpace *memorySubspace[]);
+	virtual void masterSetupForGC(MM_EnvironmentStandard *env);
 
 public:
 	/**
@@ -282,9 +300,9 @@ public:
 	void unbindWorker(MM_EnvironmentStandard *env);
 
 	/**
-	 * This is intended for use with trace point output. The actual value is volatile.
+	 * Get the memory subspace backing heap region.
 	 *
-	 * @return a snapshot of the volatile collector mask mapping evacuators that are not stopped or synchronizing
+	 * @return a pointer to the memory subspace
 	 */
 	MM_MemorySubSpace *getMemorySubspace(MM_Evacuator::EvacuationRegion region) { return _memorySubspace[region]; }
 
@@ -446,6 +464,7 @@ public:
 #if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 		, _collectorStartTime(0)
 #endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
+		, _objectAlignmentInBytes(env->getExtensions()->objectModel.getObjectAlignmentInBytes())
 		, _scannedBytes(0)
 		, _finalDiscardedBytes(0)
 		, _finalFlushedBytes(0)
@@ -454,6 +473,14 @@ public:
 		, _extensions(env->getExtensions())
 		, _dispatcher((MM_ParallelDispatcher *)_extensions->dispatcher)
 		, _tenureMask(0)
+		, _activeSubSpace(NULL)
+		, _evacuateMemorySubSpace(NULL)
+		, _survivorMemorySubSpace(NULL)
+		, _tenureMemorySubSpace(NULL)
+		, _evacuateSpaceBase(NULL)
+		, _evacuateSpaceTop(NULL)
+		, _survivorSpaceBase(NULL)
+		, _survivorSpaceTop(NULL)
 		, _omrVM(env->getOmrVM())
 	{
 		_typeId = __FUNCTION__;

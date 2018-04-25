@@ -61,6 +61,30 @@ private:
 protected:
 
 public:
+	/**
+	 * Basic array constructor obviates need for stdlibc++ linkage in gc component libraries. Array
+	 * is allocated from forge as contiguous block sized to contain requested number of elements and
+	 * must be freed using MM_Forge::free() when no longer needed.
+	 *
+	 * @param base a pointer to allocated space that will contain the instance array
+	 * @param count the number of aray elements to instantiate
+	 * @return a pointer to instantiated array
+	 */
+	static MM_EvacuatorScanspace *
+	newInstanceArray(MM_Forge *forge, void *base, uintptr_t count)
+	{
+		MM_EvacuatorScanspace *scanspace = (MM_EvacuatorScanspace *)forge->allocate(sizeof(MM_EvacuatorScanspace) * count, OMR::GC::AllocationCategory::FIXED, OMR_GET_CALLSITE());
+		if (NULL != scanspace) {
+			for (uintptr_t i = 0; i < count; i += 1) {
+				MM_EvacuatorScanspace *space = new(scanspace + i) MM_EvacuatorScanspace();
+				if (NULL == space) {
+					return NULL;
+				}
+			}
+		}
+		return scanspace;
+	}
+
 	/*
 	 * Current or latent object scanner is instantiated in space reserved within containing scanspace.
 	 *

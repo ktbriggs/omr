@@ -90,10 +90,6 @@ private:
 
 protected:
 public:
-	/* object alignment in copyspace */
-	static const uintptr_t alignment_mask = (uintptr_t)(8 - 1);
-	static const uintptr_t alignment_size = 1 + alignment_mask;
-
 	/* lower bound for work queue volume -- lower values trigger clipping of whitespace tlh allocation sizes */
 	static const uintptr_t low_work_volume = MINIMUM_TLH_SIZE;
 
@@ -133,16 +129,6 @@ public:
 private:
 protected:
 public:
-	/**
-	 * Test for object alignment
-	 */
-	MMINLINE static bool isObjectAligned(void *pointer) { return 0 == ((uintptr_t)pointer & alignment_mask); }
-
-	/**
-	 * Align to object size
-	 */
-	MMINLINE static uintptr_t alignToObjectSize(uintptr_t size) { return MM_Math::roundToCeiling(alignment_size, size); }
-
 #if defined(EVACUATOR_DEBUG)
 	static const char *callsite(const char *id);
 

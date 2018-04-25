@@ -57,6 +57,30 @@ protected:
 
 public:
 	/**
+	 * Basic array constructor obviates need for stdlibc++ linkage in gc component libraries. Array
+	 * is allocated from forge as contiguous block sized to contain requested number of elements and
+	 * must be freed using MM_Forge::free() when no longer needed.
+	 *
+	 * @param base a pointer to allocated space that will contain the instance array
+	 * @param count the number of aray elements to instantiate
+	 * @return a pointer to instantiated array
+	 */
+	static MM_EvacuatorCopyspace *
+	newInstanceArray(MM_Forge *forge, void *base, uintptr_t count)
+	{
+		MM_EvacuatorCopyspace *copyspace = (MM_EvacuatorCopyspace *)forge->allocate(sizeof(MM_EvacuatorCopyspace) * count, OMR::GC::AllocationCategory::FIXED, OMR_GET_CALLSITE());
+		if (NULL != copyspace) {
+			for (uintptr_t i = 0; i < count; i += 1) {
+				MM_EvacuatorCopyspace *space = new(copyspace + i) MM_EvacuatorCopyspace();
+				if (NULL == space) {
+					return NULL;
+				}
+			}
+		}
+		return copyspace;
+	}
+
+	/**
 	 * Get the location of the base of the copyspace
 	 */
 	MMINLINE uint8_t *getBase() { return _base; }

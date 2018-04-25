@@ -842,7 +842,7 @@ public:
 	isEvacuatorEnabled()
 	{
 #if defined(OMR_GC_MODRON_SCAVENGER)
-		return scavengerEnabled && evacuatorEnabled;
+		return evacuatorEnabled && isScavengerEnabled() && !isConcurrentScavengerEnabled();
 #else
 		return false;
 #endif /* defined(OMR_GC_MODRON_SCAVENGER) */

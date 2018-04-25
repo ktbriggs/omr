@@ -69,6 +69,7 @@ private:
 	bool _completedScan;							/* set when heap scan is complete, cleared before heap scan starts */
 	bool _abortedCycle;								/* set when work is aborted by any evacuator task */
 	EvacuationRegion _scanStackRegion;				/* set to region (survivor or tenure) that is being scanned inside stack */
+	uintptr_t _splitArrayBytesToScan;				/* records length of split array segments while they are scanned on bottom of stack */
 	uint64_t _copiedBytesDelta[2];					/* cumulative number of bytes copied out of evacuation semispace since last report */
 	uint64_t _scannedBytesDelta;					/* cumulative number of bytes scanned in survivor semispace or tenure space since last report */
 	uint64_t _copiedBytesReportingDelta;			/* copied bytes increment for reporting copied/scanned byte counts to controller */
@@ -76,19 +77,18 @@ private:
 	uintptr_t _tenureMask;							/* used to determine age threshold for tenuring evacuated objects */
 	MM_ScavengerStats *_stats;						/* pointer to MM_EnvironmentBase::_scavengerStats */
 
-	MM_EvacuatorScanspace *_stackCeiling;			/* physical limit of depth of evacuation work stack */
-	MM_EvacuatorScanspace *_stackLimit;				/* operational limit of depth of work stack */
-	MM_EvacuatorScanspace *_stackBottom;			/* bottom (location) of work stack */
+	MM_EvacuatorScanspace * const _stackBottom;		/* bottom (location) of work stack */
+	MM_EvacuatorScanspace * const _stackCeiling;	/* physical limit of depth of evacuation work stack */
+	MM_EvacuatorScanspace * _stackLimit;			/* operational limit of depth of work stack */
 	MM_EvacuatorScanspace *_peakStackFrame;			/* least recently popped stack frame since last push (may hold whitespace for next push) */
 	MM_EvacuatorScanspace *_scanStackFrame;			/* active stack frame at current stack position, NULL if work stack empty */
-	uintptr_t _splitArrayBytesToScan;				/* records length of split array segments while they are scanned on bottom of stack */
 
-	MM_EvacuatorWorklist _workList;					/* FIFO queue of large packets of unscanned work, in survivor or tenure space */
-	MM_EvacuatorFreelist _freeList;					/* LIFO queue of empty work packets */
+	MM_EvacuatorCopyspace * const _copyspace;		/* points to array of outside copyspace to receive outside copy, one for each of survivor, tenure */
+	MM_EvacuatorWhitelist * const _whiteList;		/* points to array of priority queue (largest on top) of whitespace, one for each of survivor, tenure */
 
 	MM_EvacuatorCopyspace _largeCopyspace;			/* copyspace for receiving large objects (large objects are copied and distributed solo) */
-	MM_EvacuatorCopyspace _copyspace[evacuate];		/* active copyspace receiving outside copy, one for each of survivor, tenure */
-	MM_EvacuatorWhitelist _whiteList[evacuate];		/* priority queue (largest on top) of whitespace, one for each of survivor, tenure */
+	MM_EvacuatorWorklist _workList;					/* FIFO queue of large packets of unscanned work, in survivor or tenure space */
+	MM_EvacuatorFreelist _freeList;					/* LIFO queue of empty work packets */
 
 	uint8_t *_heapBounds[3][2];						/* lower and upper bounds for nursery semispaces and tenure space */
 
@@ -355,22 +355,26 @@ public:
 		, _completedScan(false)
 		, _abortedCycle(false)
 		, _scanStackRegion(unreachable)
+		, _splitArrayBytesToScan(0)
 		, _scannedBytesDelta(0)
 		, _copiedBytesReportingDelta(0)
 		, _workReleaseThreshold(0)
 		, _tenureMask(0)
 		, _stats(NULL)
-		, _stackCeiling(NULL)
-		, _stackLimit(NULL)
-		, _stackBottom(NULL)
+		, _stackBottom(MM_EvacuatorScanspace::newInstanceArray(_forge, _stackBottom, MM_EvacuatorBase::max_scan_stack_depth))
+		, _stackCeiling(_stackBottom + MM_EvacuatorBase::max_scan_stack_depth)
+		, _stackLimit(_stackCeiling)
 		, _peakStackFrame(NULL)
 		, _scanStackFrame(NULL)
-		, _splitArrayBytesToScan(0)
+		, _copyspace(MM_EvacuatorCopyspace::newInstanceArray(_forge, _copyspace, evacuate))
+		, _whiteList(MM_EvacuatorWhitelist::newInstanceArray(_forge, _whiteList, evacuate))
 		, _freeList(_forge)
 	{
 		_typeId = __FUNCTION__;
 		_copiedBytesDelta[survivor] = _copiedBytesDelta[tenure] = 0;
+
 		Debug_MM_true(0 == (_objectModel->getObjectAlignmentInBytes() % sizeof(uintptr_t)));
+		Assert_MM_true((NULL != _stackBottom) && (NULL != _copyspace) && (NULL != _whiteList));
 	}
 
 	friend class MM_EvacuatorController;
