@@ -78,13 +78,14 @@ MM_EvacuatorParallelTask::synchronizeGCThreads(MM_EnvironmentBase *envBase, cons
 {
 	MM_EnvironmentStandard *env = MM_EnvironmentStandard::getEnvironment(envBase);
 	OMRPORT_ACCESS_FROM_OMRPORT(envBase->getPortLibrary());
-	uint64_t startTime = omrtime_hires_clock();
 	_controller->waitToSynchronize(env->getEvacuator(), id);
+
+	uint64_t startTime = omrtime_hires_clock();
 	MM_ParallelTask::synchronizeGCThreads(env, id);
 	uint64_t endTime = omrtime_hires_clock();
-	_controller->continueAfterSynchronizing(env->getEvacuator(), startTime, endTime, id);
 
 	env->_scavengerStats.addToSyncStallTime(startTime, endTime);
+	_controller->continueAfterSynchronizing(env->getEvacuator(), startTime, endTime, id);
 }
 
 bool
@@ -92,13 +93,13 @@ MM_EvacuatorParallelTask::synchronizeGCThreadsAndReleaseMaster(MM_EnvironmentBas
 {
 	MM_EnvironmentStandard *env = MM_EnvironmentStandard::getEnvironment(envBase);
 	OMRPORT_ACCESS_FROM_OMRPORT(envBase->getPortLibrary());
-	uint64_t startTime = omrtime_hires_clock();
 	_controller->waitToSynchronize(env->getEvacuator(), id);
 
+	uint64_t startTime = omrtime_hires_clock();
 	bool result = MM_ParallelTask::synchronizeGCThreadsAndReleaseMaster(env, id);
 	uint64_t endTime = omrtime_hires_clock();
+
 	env->_scavengerStats.addToSyncStallTime(startTime, endTime);
-	
 	_controller->continueAfterSynchronizing(env->getEvacuator(), startTime, endTime, id);
 	return result;	
 }
@@ -108,13 +109,13 @@ MM_EvacuatorParallelTask::synchronizeGCThreadsAndReleaseSingleThread(MM_Environm
 {
 	MM_EnvironmentStandard *env = MM_EnvironmentStandard::getEnvironment(envBase);
 	OMRPORT_ACCESS_FROM_OMRPORT(envBase->getPortLibrary());
-	uint64_t startTime = omrtime_hires_clock();
 	_controller->waitToSynchronize(env->getEvacuator(), id);
 
+	uint64_t startTime = omrtime_hires_clock();
 	bool result = MM_ParallelTask::synchronizeGCThreadsAndReleaseSingleThread(env, id);
 	uint64_t endTime = omrtime_hires_clock();
-	env->_scavengerStats.addToSyncStallTime(startTime, endTime);
 
+	env->_scavengerStats.addToSyncStallTime(startTime, endTime);
 	_controller->continueAfterSynchronizing(env->getEvacuator(), startTime, endTime, id);
 	return result;
 }
