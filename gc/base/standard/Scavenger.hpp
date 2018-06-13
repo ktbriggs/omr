@@ -109,7 +109,7 @@ private:
 
 #if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	MM_MasterGCThread _masterGCThread; /**< An object which manages the state of the master GC thread */
-	
+
 	volatile enum ConcurrentState {
 		concurrent_state_idle,
 		concurrent_state_init,
@@ -117,7 +117,7 @@ private:
 		concurrent_state_scan,
 		concurrent_state_complete
 	} _concurrentState;
-	
+
 	uint64_t _concurrentScavengerSwitchCount; /**< global counter of cycle start and cycle end transitions */
 	volatile bool _shouldYield; /**< Set by the first GC thread that observes that a criteria for yielding is met. Reset only when the concurrent phase is finished. */
 
@@ -130,7 +130,7 @@ protected:
 
 public:
 	OMR_VM *_omrVM;
-	
+
 	/*
 	 * Function members
 	 */
@@ -142,18 +142,18 @@ private:
 	 * @param env - current thread environment
 	 */
 	void flushBuffersForGetNextScanCache(MM_EnvironmentStandard *env);
-	
+
 	void saveMasterThreadTenureTLHRemainders(MM_EnvironmentStandard *env);
 	void restoreMasterThreadTenureTLHRemainders(MM_EnvironmentStandard *env);
-	
+
 	void setBackOutFlag(MM_EnvironmentBase *env, BackOutState value);
 	MMINLINE bool isBackOutFlagRaised() { return _extensions->isScavengerBackOutFlagRaised(); }
-	
+
 	/**
 	 * Check if concurrent phase of the cycle should yield to an external activity. If so, set the flag so that other GC threads react appropriately
-	 */ 
+	 */
 	MMINLINE bool checkAndSetShouldYieldFlag(MM_EnvironmentStandard *env);
-	
+
 	/**
 	 * Check if top level scan loop should be aborted before the work is done
 	 */
@@ -167,12 +167,12 @@ private:
 			 * since there will be at least one scan loop afterwards in complete phase that will drain it. Bottom line,
 			 * we don't care about isBackOutFlagRaised when deciding whether to yield.
 			 */
-					 
+
 			shouldAbort = _shouldYield;
 			if (shouldAbort) {
 				Assert_MM_true(concurrent_state_scan == _concurrentState);
 				/* Since we are aborting the scan loop without synchornizing with other GC threads (before which we flush buffers),
-				 * we have to do it now. 
+				 * we have to do it now.
 				 * There should be no danger in not synchonizing with other threads, since we can only abort/yield in main scan loop
 				 * and not during clearable STW phase, where is a potential danger of entering a scan loop without ensuring all
 				 * threads flushed buffers from previous scan loop.
@@ -181,10 +181,10 @@ private:
 			}
 		} else
 #endif /* #if defined(OMR_GC_CONCURRENT_SCAVENGER) */
-		{		
+		{
 			shouldAbort = isBackOutFlagRaised();
 		}
-		
+
 		return shouldAbort;
 	}
 
@@ -198,13 +198,13 @@ public:
 	 * Hook callback. Called when a global collect has completed
 	 */
 	static void hookGlobalCollectionComplete(J9HookInterface** hook, uintptr_t eventNum, void* eventData, void* userData);
-	
+
 	/**
 	 *  This method is called on the start of a global GC.
 	 *  @param env the current thread.
 	 */
 	void globalCollectionStart(MM_EnvironmentBase *env);
-	
+
 	/**
 	 *  This method is called on the completion of a global GC.
 	 *  @param env the current thread.
@@ -283,18 +283,18 @@ public:
 	void fixupObjectScan(MM_EnvironmentStandard *env, omrobjectptr_t objectPtr);
 	bool fixupSlot(GC_SlotObject *slotObject);
 	bool fixupSlotWithoutCompression(volatile omrobjectptr_t *slotPtr);
-	
+
 	void scavengeRememberedSetListIndirect(MM_EnvironmentStandard *env);
 	void scavengeRememberedSetListDirect(MM_EnvironmentStandard *env);
 #endif /* OMR_GC_CONCURRENT_SCAVENGER */
 
 	/**
  	 * Request for percolate GC
- 	 * 
- 	 * @return true if Global GC was executed, false if concurrent kickoff forced or Global GC is not possible 
+ 	 *
+ 	 * @return true if Global GC was executed, false if concurrent kickoff forced or Global GC is not possible
  	 */
 	bool percolateGarbageCollect(MM_EnvironmentBase *env, MM_MemorySubSpace *subSpace, MM_AllocateDescription *allocDescription, PercolateReason percolateReason, uint32_t gcCode);
-	
+
 	void reportGCCycleStart(MM_EnvironmentStandard *env);
 	void reportGCCycleEnd(MM_EnvironmentStandard *env);
 	void reportGCCycleFinalIncrementEnding(MM_EnvironmentStandard *envModron);
@@ -453,7 +453,7 @@ public:
 	 */
 	void clearIncrementGCStats(MM_EnvironmentBase *env, bool firstIncrement);
 	/**
-	 * Clear global (not thread local) cumulative cycle stats 
+	 * Clear global (not thread local) cumulative cycle stats
 	 */
 	void clearCycleGCStats(MM_EnvironmentBase *env);
 	/**
@@ -463,12 +463,12 @@ public:
 	void clearThreadGCStats(MM_EnvironmentBase *env, bool firstIncrement);
 	/**
 	 * Merge thread local stats for current phase/increment in to global current increment stats
-	 */	
+	 */
 	void mergeThreadGCStats(MM_EnvironmentBase *env);
 	/**
 	 * Merge global current increment stats in to global cycle stats
 	 * @param firstIncrement true if last increment in a cycle
-	 */		
+	 */
 	void mergeIncrementGCStats(MM_EnvironmentBase *env, bool lastIncrement);
 	/**
 	 * Common merge logic used for both thread and increment level merges.
@@ -575,7 +575,7 @@ protected:
 	 */
 	virtual MM_ConcurrentPhaseStatsBase *getConcurrentPhaseStats() { return &_concurrentPhaseStats; }
 #endif /* OMR_GC_CONCURRENT_SCAVENGER */
-	
+
 public:
 
 	static MM_Scavenger *newInstance(MM_EnvironmentStandard *env, MM_HeapRegionManager *regionManager);
@@ -605,10 +605,10 @@ public:
 	bool scavengeRoots(MM_EnvironmentBase *env);
 	bool scavengeScan(MM_EnvironmentBase *env);
 	bool scavengeComplete(MM_EnvironmentBase *env);
-	
+
 	/* mutator thread specific methods */
 	void mutatorSetupForGC(MM_EnvironmentBase *env);
-	
+
 	/* methods used by either mutator or GC threads */
 	/**
 	 * All open copy caches (even if not full) are pushed onto scan queue. Unused memory is abondoned.
@@ -616,10 +616,10 @@ public:
 	 * @param threadEnvironment Thread for which copy caches are to be released. Could be either GC or mutator thread.
 	 */
 	void threadFinalReleaseCaches(MM_EnvironmentBase *env);
-	
+
 	/**
-	 * trigger STW phase (either start or end) of a Concurrent Scavenger Cycle 
-	 */ 
+	 * trigger STW phase (either start or end) of a Concurrent Scavenger Cycle
+	 */
 	void triggerConcurrentScavengerTransition(MM_EnvironmentBase *envBase, MM_AllocateDescription *allocDescription);
 	/**
 	 * complete (trigger end) of a Concurrent Scavenger Cycle
@@ -634,19 +634,19 @@ public:
 	bool isConcurrentInProgress() {
 		return concurrent_state_idle != _concurrentState;
 	}
-	
+
 	bool isMutatorThreadInSyncWithCycle(MM_EnvironmentBase *env) {
 		return (env->_concurrentScavengerSwitchCount == _concurrentScavengerSwitchCount);
 	}
 
 	/**
 	 * Enabled/disable approriate thread local resources when starting or finishing Concurrent Scavenger Cycle
-	 */ 
-	void switchConcurrentForThread(MM_EnvironmentBase *env);	
-	
+	 */
+	void switchConcurrentForThread(MM_EnvironmentBase *env);
+
 	void reportConcurrentScavengeStart(MM_EnvironmentStandard *env);
 	void reportConcurrentScavengeEnd(MM_EnvironmentStandard *env);
-	
+
 #endif /* OMR_GC_CONCURRENT_SCAVENGER */
 
 	/**
@@ -671,25 +671,25 @@ public:
 		/* check if the object in cached allocate (from GC perspective, evacuate) ranges */
 		return ((void *)objectPtr >= _evacuateSpaceBase) && ((void *)objectPtr < _evacuateSpaceTop);
 	}
-	
+
 	MMINLINE void *
 	getEvacuateBase()
 	{
 		return _evacuateSpaceBase;
 	}
-	
+
 	MMINLINE void *
 	getEvacuateTop()
 	{
 		return _evacuateSpaceTop;
 	}
-	
+
 	MMINLINE void *
 	getSurvivorBase()
 	{
 		return _survivorSpaceBase;
 	}
-	
+
 	MMINLINE void *
 	getSurvivorTop()
 	{

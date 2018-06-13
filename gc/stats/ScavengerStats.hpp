@@ -63,12 +63,15 @@ public:
 	uintptr_t _backout;
 	uintptr_t _flipCount;
 	uintptr_t _flipBytes;
+//#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
+	uintptr_t _hashBytes; // unconditionally declared here only to allow inclusion in GCExtensionsBase.hpp, conditionally used otherwise
+//#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 	uintptr_t _tenureAggregateCount;
 	uintptr_t _tenureAggregateBytes;
-#if defined(OMR_GC_LARGE_OBJECT_AREA)	
+#if defined(OMR_GC_LARGE_OBJECT_AREA)
 	uintptr_t _tenureLOACount;
 	uintptr_t _tenureLOABytes;
-#endif /* OMR_GC_LARGE_OBJECT_AREA */	
+#endif /* OMR_GC_LARGE_OBJECT_AREA */
 	uintptr_t _failedTenureCount;
 	uintptr_t _failedTenureBytes;
 	uintptr_t _failedTenureLargest;
@@ -95,17 +98,17 @@ public:
 #endif /* J9MODRON_TGC_PARALLEL_STATISTICS */
 
 	/* Average (weighted) number of bytes free after a collection and
-	 * average number of bytes promoted by a collection. Used by 
+	 * average number of bytes promoted by a collection. Used by
 	 * concurrent collector to trigger concurrent when scavenger enabled.
-	 */ 
+	 */
 	uintptr_t _avgInitialFree;
 	uintptr_t _avgTenureBytes;
-	
+
 	uintptr_t _tiltRatio;	/**< use to pass tiltRatio to verbose */
 
 	bool _nextScavengeWillPercolate;
-	
-#if defined(OMR_GC_LARGE_OBJECT_AREA)	
+
+#if defined(OMR_GC_LARGE_OBJECT_AREA)
 	uintptr_t _avgTenureLOABytes;
 	uintptr_t _avgTenureSOABytes;
 #endif /* OMR_GC_LARGE_OBJECT_AREA */
@@ -131,16 +134,18 @@ public:
 	uint64_t _leafObjectCount;
 	uint64_t _copy_distance_counts[OMR_SCAVENGER_DISTANCE_BINS];
 	uint64_t _copy_cachesize_counts[OMR_SCAVENGER_CACHESIZE_BINS];
+	uint64_t _work_packetsize_counts[OMR_SCAVENGER_CACHESIZE_BINS];
 	uint64_t _small_object_counts[OMR_SCAVENGER_DISTANCE_BINS+1];
 	uint64_t _large_object_counts[OMR_SCAVENGER_DISTANCE_BINS+1];
 	uint64_t _copy_cachesize_sum;
+	uint64_t _work_packetsize_sum;
 
 	uint64_t _slotsCopied; /**< The number of slots copied by the thread since _slotsScanned was last sampled and reset */
 	uint64_t _slotsScanned; /**< The number of slots scanned by the thread since _slotsCopied was last sampled and reset */
-	
+
 #if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	uint64_t _readObjectBarrierCopy; /**< Number of objects copied by read barrier */
-	uint64_t _readObjectBarrierUpdate; /**< Number of reference slots updates, which may be (often is) preceded by object copy */ 
+	uint64_t _readObjectBarrierUpdate; /**< Number of reference slots updates, which may be (often is) preceded by object copy */
 #endif /* OMR_GC_CONCURRENT_SCAVENGER */
 
 protected:
@@ -165,32 +170,32 @@ public:
 	}
 
 #if defined(J9MODRON_TGC_PARALLEL_STATISTICS)
-	MMINLINE void 
+	MMINLINE void
 	addToWorkStallTime(uint64_t startTime, uint64_t endTime)
 	{
 		_workStallCount += 1;
 		_workStallTime += (endTime - startTime);
 	}
-	
-	MMINLINE void 
+
+	MMINLINE void
 	addToCompleteStallTime(uint64_t startTime, uint64_t endTime)
 	{
 		_completeStallCount += 1;
 		_completeStallTime += (endTime - startTime);
 	}
 
-	MMINLINE void 
+	MMINLINE void
 	addToSyncStallTime(uint64_t startTime, uint64_t endTime)
 	{
 		_syncStallCount += 1;
 		_syncStallTime += (endTime - startTime);
 	}
-	
+
 	/**
 	 * Get the total stall time
 	 * @return the time in hi-res ticks
 	 */
-	MMINLINE uint64_t 
+	MMINLINE uint64_t
 	getStallTime()
 	{
 		return _workStallTime + _completeStallTime + _syncStallTime;
@@ -221,13 +226,28 @@ public:
 	}
 
 	MMINLINE void
-	countObjectSize(uintptr_t objectSize)
+	countWorkPacketSize(uint64_t workPacketSize, uint64_t copyCacheSizeMax)
+	{
+		uint64_t binSize = copyCacheSizeMax / OMR_SCAVENGER_CACHESIZE_BINS;
+		uint64_t binSlot = workPacketSize / binSize;
+		if (OMR_SCAVENGER_CACHESIZE_BINS <= binSlot) {
+			binSlot = OMR_SCAVENGER_CACHESIZE_BINS - 1;
+		}
+		_work_packetsize_counts[binSlot] += 1;
+		_work_packetsize_sum += workPacketSize;
+	}
+
+	MMINLINE void
+	countObjectSize(uintptr_t objectSize, uintptr_t maxInsideCopySize)
 	{
 		if (256 >= objectSize) {
 			_small_object_counts[(OMR_MAX(8, objectSize) >> 3) - 1] += 1;
-			_small_object_counts[OMR_SCAVENGER_DISTANCE_BINS] += objectSize;
 		} else {
 			_large_object_counts[MM_Math::floorLog2(OMR_MIN(((uintptr_t)(1 << 31)), objectSize)) - 8] += 1;
+		}
+		if (maxInsideCopySize >= objectSize) {
+			_small_object_counts[OMR_SCAVENGER_DISTANCE_BINS] += objectSize;
+		} else {
 			_large_object_counts[OMR_SCAVENGER_DISTANCE_BINS] += objectSize;
 		}
 	}
