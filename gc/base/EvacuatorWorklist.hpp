@@ -78,19 +78,29 @@ public:
 	/**
 	 * Mark work packet as free and return its successor
 	 */
-	MMINLINE MM_EvacuatorWorkPacket *flush(MM_EvacuatorWorkPacket *packet) { packet->base = NULL; return packet->next; }
+	MM_EvacuatorWorkPacket *flush(MM_EvacuatorWorkPacket *packet)
+	{
+		MM_EvacuatorWorkPacket *next = packet->next;
+
+		packet->base = NULL;
+		packet->length = 0;
+		packet->offset = 0;
+		packet->next = NULL;
+
+		return next;
+	}
 
 	/**
 	 * Return the number of contained free elements
 	 */
-	MMINLINE uintptr_t getCount() { return _count; }
+	uintptr_t getCount() { return _count; }
 
 	/**
 	 * Get the next available free packet
 	 *
 	 * @return the next available free packet, or NULL if none available
 	 */
-	MMINLINE MM_EvacuatorWorkPacket *
+	MM_EvacuatorWorkPacket *
 	next()
 	{
 		Debug_MM_true((0 == _count) == (NULL == _head));
@@ -100,9 +110,10 @@ public:
 		MM_EvacuatorWorkPacket *free = NULL;
 		if (0 < _count) {
 			free = _head;
-			free->length = 0;
 			_head = free->next;
 			free->next = NULL;
+			free->base = NULL;
+			free->length = 0;
 			free->offset = 0;
 			_count -= 1;
 		}
@@ -116,16 +127,18 @@ public:
 	 *
 	 * @param free the packet to add
 	 */
-	MMINLINE void
+	void
 	add(MM_EvacuatorWorkPacket *free)
 	{
 		Debug_MM_true((0 == _count) == (NULL == _head));
-		free->length = 0;
-		free->base = NULL;
-		free->offset = 0;
+
 		free->next = _head;
+		free->base = NULL;
+		free->length = 0;
+		free->offset = 0;
 		_head = free;
 		_count += 1;
+
 		Debug_MM_true((0 == _count) == (NULL == _head));
 	}
 
@@ -134,7 +147,7 @@ public:
 	 *
 	 * @return the number of free elements added
 	 */
-	MMINLINE uintptr_t
+	uintptr_t
 	refresh()
 	{
 		if ((NULL == _underflow) || (0 == _count)) {
@@ -156,7 +169,7 @@ public:
 		return _count;
 	}
 
-	MMINLINE void
+	void
 	reload()
 	{
 		if (NULL != _underflow) {
@@ -180,7 +193,7 @@ public:
 	/**
 	 * Releases all underflow chunks, if any are allocated, and resets list to empty state.
 	 */
-	MMINLINE void
+	void
 	reset()
 	{
 		/* deallocate all underflow chunks allocated from system memory (forged) */
@@ -231,83 +244,116 @@ private:
 protected:
 public:
 	/**
-	 * Returns a pointer to the volatile sum of the number of bytes contained in work packets in the list
+	 * Get the volume of work from a work packet
+	 *
+	 * @param[in] work pointer to work packet.
 	 */
-	MMINLINE volatile uint64_t *volume() { return &_volume; }
+	uint64_t volume(const MM_EvacuatorWorkPacket *work) { return work->length * ((0 == work->offset) ? 1 : sizeof(fomrobject_t)); }
 
 	/**
-	 * Add a work packet at the end of the list. If the contained work is contiguous with the work in the
-	 * packet at the tail of the list the contained work will be coalesced into the tail packet and the
-	 * packet will be added to the freelist.
+	 * Returns a pointer to the volatile sum of the number of bytes contained in work packets in the list
+	 */
+	volatile uint64_t *volume() { return &_volume; }
+
+	/**
+	 * Peek at the work packet at the head of the list, or NULL
+	 */
+	const MM_EvacuatorWorkPacket *peek() { return _head; }
+
+	/**
+	 * Add a work packet at the end of the list, or merge it into the tail packet. If merged the
+	 * input work packet pointer will be returned, otherwise NULL is returned.
 	 *
 	 * @param work the packet to add
-	 * @param freelist the list of free work packets
-	 * @return true if the worklist was empty before adding the packet
+	 * @return work if merged into tail packet, otherwise NULL
 	 */
-	MMINLINE void
-	add(MM_EvacuatorWorkPacket *work, MM_EvacuatorFreelist *freeList)
+	MM_EvacuatorWorkPacket *
+	add(MM_EvacuatorWorkPacket *work)
 	{
 		Debug_MM_true((0 == _volume) == (NULL == _head));
 		Debug_MM_true((NULL == _head) == (NULL == _tail));
-		Debug_MM_true((NULL != work->base) && (0 < work->length));
+		Debug_MM_true((_head != _tail) || (NULL == _head) || (volume(_head) == _volume));
+		Debug_MM_true((NULL != work) && (NULL != work->base) && (0 < work->length));
+
+		VM_AtomicSupport::addU64(&_volume, volume(work));
 
 		work->next = NULL;
-		uintptr_t length = work->length;
 		if (NULL != _tail) {
-			if ((0 == work->offset) && (((uintptr_t)_tail->base + _tail->length) == (uintptr_t)work->base)) {
+			/* work packets can be merged if not split array packets and work is contiguous with tail */
+			if ((0 == (_tail->offset + work->offset)) && (((uintptr_t)_tail->base + _tail->length) == (uintptr_t)work->base)) {
 				_tail->length += work->length;
-				freeList->add(work);
 			} else {
-				_tail->next = work;
-				_tail = work;
+				_tail = _tail->next = work;
+				work = NULL;
 			}
 		} else {
 			_head = _tail = work;
+			work = NULL;
 		}
 
-		VM_AtomicSupport::addU64(&_volume, length);
 		Debug_MM_true((0 == _volume) == (NULL == _head));
+		Debug_MM_true((NULL == _head) == (NULL == _tail));
+		Debug_MM_true((_head != _tail) || (NULL == _head) || (volume(_head) == _volume));
+
+		/* caller should discard (merged work packet to freelist) if not null */
+		return work;
 	}
 
 	/**
-	 * Get the next available work packet from the head of the list.
+	 * Get the next available free packet.
 	 *
 	 * @return the next work packet, if available, or NULL
 	 */
-	MMINLINE MM_EvacuatorWorkPacket *
+	MM_EvacuatorWorkPacket *
 	next()
 	{
 		Debug_MM_true((0 == _volume) == (NULL == _head));
 		Debug_MM_true((NULL == _head) == (NULL == _tail));
+		Debug_MM_true((_head != _tail) || (NULL == _head) || (volume(_head) == _volume));
 
-		MM_EvacuatorWorkPacket *take = NULL;
-		if (NULL != _head) {
-			VM_AtomicSupport::subtractU64(&_volume, _head->length);
-			take = _head;
-			_head = take->next;
-			take->next = NULL;
-			if (take == _tail) {
-				Debug_MM_true(NULL == _head);
-				_tail = NULL;
+		MM_EvacuatorWorkPacket *work = _head;
+		if (NULL != work) {
+
+			VM_AtomicSupport::subtractU64(&_volume, volume(work));
+
+			if (work != _tail) {
+				Debug_MM_true(NULL != work->next);
+				_head = work->next;
+				work->next = NULL;
+			} else {
+				Debug_MM_true(NULL == work->next);
+				_head = _tail = NULL;
 			}
+
+			Debug_MM_true((NULL != work->base) && (0 < work->length));
 		}
 
 		Debug_MM_true((0 == _volume) == (NULL == _head));
-		return take;
+		Debug_MM_true((NULL == _head) == (NULL == _tail));
+		Debug_MM_true((_head != _tail) || (NULL == _head) || (volume(_head) == _volume));
+		Debug_MM_true((NULL == work) || ((NULL != work->base) && (0 < work->length)));
+		return work;
 	}
 
 	/**
 	 * Just clear count and list pointers. The freelist owns the forge memory
 	 * allocated for one evacuator and this worklist may contain work packets
 	 * allocated and distributed from other evacuators. Each evacuator reclaims
-	 * free itpacketsrom its own allocations at the beginning of each gc cycle.
+	 * it's allocated forge memory at the beginning of each gc cycle.
 	 */
-	MMINLINE void
+	void
 	flush(MM_EvacuatorFreelist *freeList)
 	{
 		Debug_MM_true((0 == _volume) == (NULL == _head));
+		Debug_MM_true((NULL == _head) == (NULL == _tail));
+
 		VM_AtomicSupport::setU64(&_volume, 0);
-		_head = _tail = NULL;
+
+		while (NULL != _head) {
+			_head = freeList->flush(_head);
+		}
+		_tail = NULL;
+
 		Debug_MM_true((0 == _volume) == (NULL == _head));
 	}
 

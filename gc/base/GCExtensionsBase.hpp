@@ -101,6 +101,12 @@ struct J9Pool;
 #define LOCALGC_ESTIMATE_FRAGMENTATION 		0x1
 #define GLOBALGC_ESTIMATE_FRAGMENTATION 	0x2
 
+#define EVACUATOR_DEFAULT_STACK_DEPTH			32
+#define EVACUATOR_DEFAULT_INSIDE_OBJECT_SIZE	256
+#define EVACUATOR_DEFAULT_INSIDE_COPY_DISTANCE	(4 * 1024)
+#define EVACUATOR_DEFAULT_WORK_QUANTUM 4096
+#define EVACUATOR_DEFAULT_WORK_QUANTA 0
+
 enum ExcessiveLevel {
 	excessive_gc_normal = 0,
 	excessive_gc_aggressive,
@@ -352,12 +358,13 @@ public:
 	uintptr_t heapContractionStabilizationCount; /**< GC count required before the heap is allowed to contract due to excessvie time after last heap expansion */
 
 	float heapSizeStartupHintConservativeFactor; /**< Use only a fraction of hints stored in SC */
-	float heapSizeStartupHintWeightNewValue;		/**< Learn slowly by historic averaging of stored hints */	
+	float heapSizeStartupHintWeightNewValue;	/**< Learn slowly by historic averaging of stored hints */
+
 
 	uintptr_t workpacketCount; /**< this value is ONLY set if -Xgcworkpackets is specified - otherwise the workpacket count is determined heuristically */
 	uintptr_t packetListSplit; /**< the number of ways to split packet lists, set by -XXgc:packetListLockSplit=, or determined heuristically based on the number of GC threads */
 	uintptr_t cacheListSplit; /**< the number of ways to split scanCache lists, set by -XXgc:cacheListLockSplit=, or determined heuristically based on the number of GC threads */
-	
+
 	uintptr_t markingArraySplitMaximumAmount; /**< maximum number of elements to split array scanning work in marking scheme */
 	uintptr_t markingArraySplitMinimumAmount; /**< minimum number of elements to split array scanning work in marking scheme */
 
@@ -432,8 +439,8 @@ public:
 	bool scvTenureStrategyLookback; /**< Flag for enabling the Lookback scavenger tenure strategy. */
 	bool scvTenureStrategyHistory; /**< Flag for enabling the History scavenger tenure strategy. */
 	bool scavengerEnabled;
-	bool evacuatorEnabled;
 	bool scavengerRsoScanUnsafe;
+	bool evacuatorEnabled;
 #if defined(OMR_GC_CONCURRENT_SCAVENGER)
 	bool softwareRangeCheckReadBarrier; /**< enable software read barrier instead of hardware guarded loads when running with CS */
 	bool concurrentScavenger; /**< CS enabled/disabled flag */
@@ -443,6 +450,11 @@ public:
 	bool concurrentScavengerBackgroundThreadsForced; /**< true if concurrentScavengerBackgroundThreads set via command line option */
 	uintptr_t concurrentScavengerSlack; /**< amount of bytes added on top of avearge allocated bytes during concurrent cycle, in calcualtion for survivor size */
 #endif	/* OMR_GC_CONCURRENT_SCAVENGER */
+	uintptr_t evacuatorMaximumStackDepth; /**< The number of scan stack frames to allocate */
+	uintptr_t evacuatorMaximumInsideCopySize; /**< The size in bytes of the largest object that can be copied inside an evacuator scan stack frame */
+	uintptr_t evacuatorMaximumInsideCopyDistance; /**< Referent object wills be pushed up the stack if inside scan-copy distance if greater than this value */
+	uintptr_t evacuatorWorkQuantumSize; /**< Determines minimum evacuator wok packet volume */
+	uintptr_t evacuatorWorkQuanta; /**< Determines minimum evacuator volume of work after stall condition cleared */
 	uintptr_t scavengerFailedTenureThreshold;
 	uintptr_t maxScavengeBeforeGlobal;
 	uintptr_t scvArraySplitMaximumAmount; /**< maximum number of elements to split array scanning work in the scavenger */
@@ -592,7 +604,7 @@ public:
 	MM_HeapMap* previousMarkMap; /**< the previous valid mark map. This can be used to walk marked objects in regions which have _markMapUpToDate set to true */
 
 	MM_GlobalAllocationManager* globalAllocationManager; /**< Used for attaching threads to AllocationContexts */
-	
+
 #if defined(OMR_GC_REALTIME) || defined(OMR_GC_SEGREGATED_HEAP)
 	uintptr_t managedAllocationContextCount; /**< The number of allocation contexts which will be instantiated and managed by the GlobalAllocationManagerRealtime (currently 2*cpu_count) */
 #endif /* OMR_GC_REALTIME || OMR_GC_SEGREGATED_HEAP */
@@ -666,7 +678,7 @@ public:
 	bool numaForced; /**< if true, specifies if numa is disabled or enabled (actual value stored in NUMA Manager) by command line option */
 
 	bool padToPageSize;
-	
+
 	bool fvtest_disableExplictMasterThread; /**< Test option to disable creation of explicit master GC thread */
 
 #if defined(OMR_GC_VLHGC)
@@ -737,7 +749,7 @@ public:
 
 	bool alwaysCallWriteBarrier; /**< was -Xgc:alwayscallwritebarrier specified? */
 	bool alwaysCallReadBarrier; /**< was -Xgc:alwaysCallReadBarrier specified? */
-	
+
 	bool _holdRandomThreadBeforeHandlingWorkUnit; /**< Whether we should randomly hold up a thread entering MM_ParallelTask::handleNextWorkUnit() */
 	uintptr_t _holdRandomThreadBeforeHandlingWorkUnitPeriod; /**< How often (in terms of number of times MM_ParallelTask::handleNextWorkUnit() is called) to randomly hold up a thread entering MM_ParallelTask::handleNextWorkUnit() */
 	bool _forceRandomBackoutsAfterScan; /**< Whether we should force MM_Scavenger::completeScan() to randomly fail due to backout */
@@ -835,7 +847,7 @@ public:
 		return false;
 #endif /* defined(OMR_GC_CONCURRENT_SCAVENGER) */
 	}
-	
+
 	MMINLINE bool
 	isConcurrentScavengerHWSupported()
 	{
@@ -845,7 +857,7 @@ public:
 		return false;
 #endif /* defined(OMR_GC_CONCURRENT_SCAVENGER) */
 	}
-	
+
    MMINLINE bool
    isSoftwareRangeCheckReadBarrierEnabled()
    {
@@ -857,7 +869,7 @@ public:
    }
 
 	bool isConcurrentScavengerInProgress();
-	
+
 	MMINLINE bool
 	isScavengerEnabled()
 	{
@@ -999,15 +1011,15 @@ public:
 		*start = _guaranteedNurseryStart;
 		*end = _guaranteedNurseryEnd;
 	}
-	
+
 	MMINLINE bool isRememberedSetInOverflowState() { return _isRememberedSetInOverflow; }
 	MMINLINE void setRememberedSetOverflowState() { _isRememberedSetInOverflow = true; }
 	MMINLINE void clearRememberedSetOverflowState() { _isRememberedSetInOverflow = false; }
-	
+
 	MMINLINE void setScavengerBackOutState(BackOutState backOutState) { _backOutState = backOutState; }
 	MMINLINE BackOutState getScavengerBackOutState() { return _backOutState; }
 	MMINLINE bool isScavengerBackOutFlagRaised() { return backOutFlagCleared < _backOutState; }
-	
+
 	MMINLINE bool shouldScavengeNotifyGlobalGCOfOldToOldReference() { return _concurrentGlobalGCInProgress; }
 	MMINLINE void setConcurrentGlobalGCInProgress(bool inProgress) { _concurrentGlobalGCInProgress = inProgress; }
 #endif /* OMR_GC_MODRON_SCAVENGER */
@@ -1033,7 +1045,7 @@ public:
 		return ((uintptr_t)baseSlotPtr >= (uintptr_t)_tenureBase) && ((uintptr_t)topSlotPtr - (uintptr_t)_tenureBase) < _tenureSize;
 	}
 
-	MMINLINE bool 
+	MMINLINE bool
 	isFvtestForce(uintptr_t *forceMax, uintptr_t *forceCntr)
 	{
 		bool result = false;
@@ -1047,25 +1059,25 @@ public:
 		return result;
 	}
 
-	MMINLINE bool 
+	MMINLINE bool
 	isFvtestForceSweepChunkArrayCommitFailure()
 	{
 		return isFvtestForce(&fvtest_forceSweepChunkArrayCommitFailure, &fvtest_forceSweepChunkArrayCommitFailureCounter);
 	}
 
-	MMINLINE bool 
+	MMINLINE bool
 	isFvtestForceMarkMapCommitFailure()
 	{
 		return isFvtestForce(&fvtest_forceMarkMapCommitFailure, &fvtest_forceMarkMapCommitFailureCounter);
 	}
 
-	MMINLINE bool 
+	MMINLINE bool
 	isFvtestForceMarkMapDecommitFailure()
 	{
 		return isFvtestForce(&fvtest_forceMarkMapDecommitFailure, &fvtest_forceMarkMapDecommitFailureCounter);
 	}
 
-	MMINLINE bool 
+	MMINLINE bool
 	isFvtestForceReferenceChainWalkerMarkMapCommitFailure()
 	{
 		return isFvtestForce(&fvtest_forceReferenceChainWalkerMarkMapCommitFailure, &fvtest_forceReferenceChainWalkerMarkMapCommitFailureCounter);
@@ -1275,7 +1287,7 @@ public:
 		, incrementScavengerStats()
 		, scavengerStats()
 		, copyScanRatio()
-#endif /* OMR_GC_MODRON_SCAVENGER */		
+#endif /* OMR_GC_MODRON_SCAVENGER */
 #if defined(OMR_GC_VLHGC)
 		, globalVLHGCStats()
 #endif /* OMR_GC_VLHGC */
@@ -1367,7 +1379,7 @@ public:
 		, heapExpansionStabilizationCount(0)
 		, heapContractionStabilizationCount(3)
 		, heapSizeStartupHintConservativeFactor((float)0.7)
-		, heapSizeStartupHintWeightNewValue((float)0.0)		
+		, heapSizeStartupHintWeightNewValue((float)0.0)
 		, workpacketCount(0) /* only set if -Xgcworkpackets specified */
 		, packetListSplit(0)
 		, cacheListSplit(0)
@@ -1442,6 +1454,11 @@ public:
 		, concurrentScavengerBackgroundThreadsForced(false)
 		, concurrentScavengerSlack(0)
 #endif /* defined(OMR_GC_CONCURRENT_SCAVENGER) */
+		, evacuatorMaximumStackDepth(EVACUATOR_DEFAULT_STACK_DEPTH)
+		, evacuatorMaximumInsideCopySize(EVACUATOR_DEFAULT_INSIDE_OBJECT_SIZE)
+		, evacuatorMaximumInsideCopyDistance(EVACUATOR_DEFAULT_INSIDE_COPY_DISTANCE)
+		, evacuatorWorkQuantumSize(EVACUATOR_DEFAULT_WORK_QUANTUM)
+		, evacuatorWorkQuanta(EVACUATOR_DEFAULT_WORK_QUANTA)
 		, scavengerFailedTenureThreshold(0)
 		, maxScavengeBeforeGlobal(0)
 		, scvArraySplitMaximumAmount(DEFAULT_ARRAY_SPLIT_MAXIMUM_SIZE)

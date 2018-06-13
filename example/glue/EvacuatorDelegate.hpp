@@ -152,6 +152,11 @@ public:
 	/**
 	 * Return true if teh object is an indexable array of pointers to objects
 	 */
+	bool isIndexablePointerArray(omrobjectptr_t object) { return false; }
+
+	/**
+	 * Return true if teh object is an indexable array of pointers to objects
+	 */
 	bool isIndexablePointerArray(MM_ForwardedHeader *forwardedHeader) { return false; }
 
 	/**
@@ -232,6 +237,7 @@ public:
 	{ }
 
 #if defined(EVACUATOR_DEBUG_DELEGATE)
+	bool isValidObject(omrobjectptr_t objectptr) { return true; }
 	void debugValidateObject(omrobjectptr_t objectptr) { }
 	void debugValidateObject(MM_ForwardedHeader *forwardedHeader) { }
 	const char *

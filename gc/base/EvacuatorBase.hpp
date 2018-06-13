@@ -24,7 +24,11 @@
 #define EVACUATORBASE_HPP_
 
 #undef EVACUATOR_DEBUG
-#undef EVACUATOR_DEBUG_ALWAYS
+#define EVACUATOR_DEBUG_ALWAYS
+
+#if defined(EVACUATOR_DEBUG) && defined(EVACUATOR_DEBUG_ALWAYS)
+#error "EVACUATOR_DEBUG and EVACUATOR_DEBUG_ALWAYS are mutually exclusive"
+#endif
 
 #if defined(EVACUATOR_DEBUG)
 #include "omrgcconsts.h"
@@ -39,14 +43,20 @@
 #define EVACUATOR_DEBUG_WORK 8
 #define EVACUATOR_DEBUG_STACK 16
 #define EVACUATOR_DEBUG_COPY 32
-#define EVACUATOR_DEBUG_ALLOCATE 64
-#define EVACUATOR_DEBUG_WHITELISTS 128
-#define EVACUATOR_DEBUG_POISON_DISCARD 256
-#define EVACUATOR_DEBUG_BACKOUT 512
-#define EVACUATOR_DEBUG_DELEGATE 1024
+#define EVACUATOR_DEBUG_REMEMBERED 64
+#define EVACUATOR_DEBUG_ALLOCATE 128
+#define EVACUATOR_DEBUG_WHITELISTS 256
+#define EVACUATOR_DEBUG_POISON_DISCARD 512
+#define EVACUATOR_DEBUG_BACKOUT 1024
+#define EVACUATOR_DEBUG_DELEGATE 2048
+#define EVACUATOR_DEBUG_HEAPCHECK 4096
 
 /* default debug flags */
-#define EVACUATOR_DEBUG_DEFAULT_FLAGS (0)
+#if defined(EVACUATOR_DEBUG)
+#define EVACUATOR_DEBUG_DEFAULT_FLAGS 1
+#else
+#define EVACUATOR_DEBUG_DEFAULT_FLAGS 0
+#endif /* defined(EVACUATOR_DEBUG) */
 
 /* delegate can define additional flags above 0x10000 */
 #define EVACUATOR_DEBUG_DELEGATE_BASE 0x10000
@@ -66,12 +76,7 @@
 
 #include "GCExtensionsBase.hpp"
 
-#if (DEFAULT_SCAN_CACHE_MINIMUM_SIZE > (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3))
-#error "Scan cache default sizes must satisfy DEFAULT_SCAN_CACHE_MINIMUM_SIZE <= (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3)"
-#endif /* (DEFAULT_SCAN_CACHE_MINIMUM_SIZE > (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3)) */
-
-/* this value is used as lower bound for peak copy production rate (copied/scanned) -- lower values are used to scale allocation and work release sizes */
-#define EVACUATOR_LIMIT_PRODUCTION_RATE 1.125 /* C++ does not allow static const declarations for non-integer types */
+#define NOINLINE
 
 class MM_EvacuatorBase
 {
@@ -90,38 +95,30 @@ private:
 
 protected:
 public:
-	/* lower bound for work queue volume -- lower values trigger clipping of whitespace tlh allocation sizes */
-	static const uintptr_t low_work_volume = MINIMUM_TLH_SIZE;
-
-	/* bounds for TLH allocation size */
-	static const uintptr_t min_tlh_allocation_size = DEFAULT_SCAN_CACHE_MINIMUM_SIZE;
-	static const uintptr_t max_tlh_allocation_size = DEFAULT_SCAN_CACHE_MAXIMUM_SIZE;
-
-	/* Largest amount of whitespace that can be discarded from the scan stack and outside copyspaces */
+	/* largest amount of whitespace that can be discarded from the scan stack and outside copyspaces */
 	static const uintptr_t max_scanspace_remainder = 32;
-	static const uintptr_t max_copyspace_remainder = MINIMUM_TLH_SIZE;
+	static const uintptr_t max_copyspace_remainder = 768;
 
-	/* Actual maximal size of scan stack -- operational limit may be lowered to increase outside copying */
-	static const uintptr_t max_scan_stack_depth = 32;
-	/* Object size threshold for copying inside -- larger objects are always copied to outside copyspaces */
-	static const uintptr_t max_inside_object_size = 256;
+	/* Work packet size cannot be less than this */
+	static const uintptr_t min_workspace_size = 256;
+	/* multiplier for minimum work packet size determines threshold byte count for objects overflowing copyspace whitespace remainder */
+	static const uintptr_t max_large_object_overflow_quanta = 3;
 
-	/* base 2 log of upper bound on distance from base to copy head in stack scan frame*/
-	static const uintptr_t inside_copy_log_size = 12;
-	/* upper bound on distance from base to copy head */
-	static const uintptr_t inside_copy_size = (uintptr_t)1 << inside_copy_log_size;
-	/* used to set actual bound on copy head at next page boundary within stack scan frame */
-	static const uintptr_t inside_copy_mask = inside_copy_size - 1;
-
-	/* number of elements in whitelist backing array must be (2^N)-1 for some N */
-	static const uintptr_t max_whitelist = 15;
+	/* minimum size of whitespace that is recyclable from whitelists */
+	static const uintptr_t min_recyclable_whitespace = 8192;
 
 	/* maximum number of array element slots to include in each split array segment */
 	static const uintptr_t max_split_segment_elements = DEFAULT_ARRAY_SPLIT_MINIMUM_SIZE;
-	/* minimum size in bytes of a splitable indexable object */
-	static const uintptr_t min_split_indexable_size = 2 * max_split_segment_elements * sizeof(fomrobject_t);
+	/* minimum size in bytes of a splitable indexable object (header, element count, slots...) */
+	static const uintptr_t min_split_indexable_size = (max_split_segment_elements * sizeof(fomrobject_t));
 
-	enum { always, until, at, from };
+	/* Minimal size of scan stack -- a value of 1 forces breadth first scanning */
+	static const uintptr_t min_scan_stack_depth = 1;
+	/* Object size threshold for copying inside -cannot be set to a value lower than this */
+	static const uintptr_t min_inside_object_size = OMR_MINIMUM_OBJECT_SIZE;
+
+	/* number of elements in whitelist backing array must be (2^N)-1 for some N */
+	static const uintptr_t max_whitelist = 15;
 
 /**
  * Function members
@@ -132,7 +129,9 @@ public:
 #if defined(EVACUATOR_DEBUG)
 	static const char *callsite(const char *id);
 
-	MMINLINE void
+	enum { always, until, at, from };
+
+	void
 	setDebugFlags(uintptr_t debugFlags, uintptr_t debugCycle, uintptr_t debugEpoch, uintptr_t debugTrace = always)
 	{
 		_debugFlags = debugFlags;
@@ -142,9 +141,9 @@ public:
 	}
 	void setDebugFlags(uint64_t debugFlags = EVACUATOR_DEBUG_DEFAULT_FLAGS);
 
-	MMINLINE void setDebugCycleAndEpoch(uintptr_t gcCycle, uintptr_t cycleEpoch) { _gcCycle = gcCycle;  _gcEpoch = cycleEpoch; }
+	void setDebugCycleAndEpoch(uintptr_t gcCycle, uintptr_t cycleEpoch) { _gcCycle = gcCycle;  _gcEpoch = cycleEpoch; }
 
-	MMINLINE bool
+	bool
 	isDebugCycleAndEpoch()
 	{
 		if (0 != _debugFlags) {
@@ -164,39 +163,43 @@ public:
 		return true;
 	}
 
-	MMINLINE bool isDebugFlagSet(uintptr_t debugFlag) { return isDebugCycleAndEpoch() && (debugFlag == (debugFlag & _debugFlags)); }
-	MMINLINE bool isAnyDebugFlagSet(uintptr_t debugFlags) { return isDebugCycleAndEpoch() && (0 != (debugFlags | _debugFlags)); }
-	MMINLINE bool areAllDebugFlagsSet(uintptr_t debugFlags) { return isDebugFlagSet(debugFlags); }
-	MMINLINE bool isDebugEnd() { return isDebugFlagSet(EVACUATOR_DEBUG_END); }
-	MMINLINE bool isDebugCycle() { return isDebugFlagSet(EVACUATOR_DEBUG_CYCLE); }
-	MMINLINE bool isDebugEpoch() { return isDebugFlagSet(EVACUATOR_DEBUG_EPOCH); }
-	MMINLINE bool isDebugStack() { return isDebugFlagSet(EVACUATOR_DEBUG_STACK); }
-	MMINLINE bool isDebugWork() { return isDebugFlagSet(EVACUATOR_DEBUG_WORK); }
-	MMINLINE bool isDebugCopy() { return isDebugFlagSet(EVACUATOR_DEBUG_COPY); }
-	MMINLINE bool isDebugWhitelists() { return isDebugFlagSet(EVACUATOR_DEBUG_WHITELISTS); }
-	MMINLINE bool isDebugPoisonDiscard() { return isDebugFlagSet(EVACUATOR_DEBUG_POISON_DISCARD); }
-	MMINLINE bool isDebugAllocate() { return isDebugFlagSet(EVACUATOR_DEBUG_ALLOCATE); }
-	MMINLINE bool isDebugBackout() { return isDebugFlagSet(EVACUATOR_DEBUG_BACKOUT); }
-	MMINLINE bool isDebugDelegate() { return isDebugFlagSet(EVACUATOR_DEBUG_DELEGATE); }
+	bool isDebugFlagSet(uintptr_t debugFlag) { return isDebugCycleAndEpoch() && (debugFlag == (debugFlag & _debugFlags)); }
+	bool isAnyDebugFlagSet(uintptr_t debugFlags) { return isDebugCycleAndEpoch() && (0 != (debugFlags | _debugFlags)); }
+	bool areAllDebugFlagsSet(uintptr_t debugFlags) { return isDebugFlagSet(debugFlags); }
+	bool isDebugEnd() { return isDebugFlagSet(EVACUATOR_DEBUG_END); }
+	bool isDebugCycle() { return isDebugFlagSet(EVACUATOR_DEBUG_CYCLE); }
+	bool isDebugEpoch() { return isDebugFlagSet(EVACUATOR_DEBUG_EPOCH); }
+	bool isDebugStack() { return isDebugFlagSet(EVACUATOR_DEBUG_STACK); }
+	bool isDebugWork() { return isDebugFlagSet(EVACUATOR_DEBUG_WORK); }
+	bool isDebugCopy() { return isDebugFlagSet(EVACUATOR_DEBUG_COPY); }
+	bool isDebugRemembered() { return isDebugFlagSet(EVACUATOR_DEBUG_REMEMBERED); }
+	bool isDebugWhitelists() { return isDebugFlagSet(EVACUATOR_DEBUG_WHITELISTS); }
+	bool isDebugPoisonDiscard() { return isDebugFlagSet(EVACUATOR_DEBUG_POISON_DISCARD); }
+	bool isDebugAllocate() { return isDebugFlagSet(EVACUATOR_DEBUG_ALLOCATE); }
+	bool isDebugBackout() { return isDebugFlagSet(EVACUATOR_DEBUG_BACKOUT); }
+	bool isDebugDelegate() { return isDebugFlagSet(EVACUATOR_DEBUG_DELEGATE); }
+	bool isDebugHeapCheck() { return isDebugFlagSet(EVACUATOR_DEBUG_HEAPCHECK); }
 #else
-	MMINLINE void setDebugFlags(uintptr_t debugFlags, uintptr_t debugCycle, uintptr_t debugEpoch, uintptr_t debugTrace = 0) { }
-	MMINLINE void setDebugFlags(uint64_t debugFlags = 0) { }
-	MMINLINE void setDebugCycleAndEpoch(uintptr_t gcCycle, uintptr_t cycleEpoch) { }
-	MMINLINE bool isDebugCycleAndEpoch() { return false; }
-	MMINLINE bool isDebugFlagSet(uintptr_t debugFlag) { return false; }
-	MMINLINE bool isAnyDebugFlagSet(uintptr_t debugFlags) { return false; }
-	MMINLINE bool areAllDebugFlagsSet(uintptr_t debugFlags) { return false; }
-	MMINLINE bool isDebugEnd() { return false; }
-	MMINLINE bool isDebugCycle() { return false; }
-	MMINLINE bool isDebugEpoch() { return false; }
-	MMINLINE bool isDebugWork() { return false; }
-	MMINLINE bool isDebugStack() { return false; }
-	MMINLINE bool isDebugCopy() { return false; }
-	MMINLINE bool isDebugWhitelists() { return false; }
-	MMINLINE bool isDebugPoisonDiscard() { return false; }
-	MMINLINE bool isDebugAllocate() { return false; }
-	MMINLINE bool isDebugBackout() { return false; }
-	MMINLINE bool isDebugDelegate() { return false; }
+	void setDebugFlags(uintptr_t debugFlags, uintptr_t debugCycle, uintptr_t debugEpoch, uintptr_t debugTrace = 0) { }
+	void setDebugFlags(uint64_t debugFlags = 0) { }
+	void setDebugCycleAndEpoch(uintptr_t gcCycle, uintptr_t cycleEpoch) { }
+	bool isDebugCycleAndEpoch() { return false; }
+	bool isDebugFlagSet(uintptr_t debugFlag) { return false; }
+	bool isAnyDebugFlagSet(uintptr_t debugFlags) { return false; }
+	bool areAllDebugFlagsSet(uintptr_t debugFlags) { return false; }
+	bool isDebugEnd() { return false; }
+	bool isDebugCycle() { return false; }
+	bool isDebugEpoch() { return false; }
+	bool isDebugWork() { return false; }
+	bool isDebugStack() { return false; }
+	bool isDebugCopy() { return false; }
+	bool isDebugRemembered() { return false; }
+	bool isDebugWhitelists() { return false; }
+	bool isDebugPoisonDiscard() { return false; }
+	bool isDebugAllocate() { return false; }
+	bool isDebugBackout() { return false; }
+	bool isDebugDelegate() { return false; }
+	bool isDebugHeapCheck() { return false; }
 #endif /* defined(EVACUATOR_DEBUG) */
 
 	MM_EvacuatorBase()
