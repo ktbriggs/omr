@@ -66,7 +66,8 @@ public:
 	uintptr_t count() { return _epoch; }
 
 	/* get a past (committed) epoch */
-	Epoch *epoch(uintptr_t epoch)
+	Epoch *
+	epoch(uintptr_t epoch)
 	{
 		Debug_MM_true((epoch < _epoch) || (0 == epoch));
 		return &_history[epochToIndex(epoch)];

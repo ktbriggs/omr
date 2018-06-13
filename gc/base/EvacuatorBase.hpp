@@ -66,6 +66,7 @@
 
 #include "GCExtensionsBase.hpp"
 
+/* ensure that there is a reasonable range between min/max whitespace allocation sizes */
 #if (DEFAULT_SCAN_CACHE_MINIMUM_SIZE > (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3))
 #error "Scan cache default sizes must satisfy DEFAULT_SCAN_CACHE_MINIMUM_SIZE <= (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3)"
 #endif /* (DEFAULT_SCAN_CACHE_MINIMUM_SIZE > (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3)) */
