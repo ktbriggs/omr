@@ -46,6 +46,11 @@
  * and allows scanning for most objects (<32/64 slots) to complete inline, without
  * requiring a virtual method call (getNextSlotMap()). Otherwise at least one such call
  * is required before getNextSlot() will return NULL.
+ *
+ * Note that this is a hot object, so field organization to maximize cache localization
+ * is important. The _scanMap, _scanPtr, and _slotObject fields the most frequently used
+ * and they are frequently used together, so they are grouped together at the head of the
+ * object.
  */
 class GC_ObjectScanner : public MM_BaseVirtual
 {

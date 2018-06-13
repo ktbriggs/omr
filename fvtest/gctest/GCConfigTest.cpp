@@ -307,8 +307,18 @@ GCConfigTest::allocateHelper(const char *objName, uintptr_t size)
 	objEntry.name = objName;
 	objEntry.objPtr = NULL;
 
-	MM_ObjectAllocationModel  objectAllocationModel(env, size, MM_ObjectAllocationModel::selectObjectAllocationFlags(false, false, false, false));
-	objEntry.objPtr = OMR_GC_AllocateObject(exampleVM->_omrVMThread, &objectAllocationModel);
+	uint8_t objectAllocationModelSpace[sizeof(MM_ObjectAllocationModel)];
+	MM_ObjectAllocationModel *noGc = new(objectAllocationModelSpace)
+			MM_ObjectAllocationModel(env, size, MM_ObjectAllocationModel::selectObjectAllocationFlags(false, false, false, true));
+	objEntry.objPtr = OMR_GC_AllocateObject(exampleVM->_omrVMThread, noGc);
+
+	if (NULL == objEntry.objPtr) {
+		gcTestEnv->log("No free memory to allocate %s of size 0x%llx, GC start.\n", objName, size);
+		MM_ObjectAllocationModel *withGc = new(objectAllocationModelSpace)
+				MM_ObjectAllocationModel(env, size, MM_ObjectAllocationModel::selectObjectAllocationFlags(false, false, false, false));
+		objEntry.objPtr = OMR_GC_AllocateObject(exampleVM->_omrVMThread, withGc);
+	}
+
 	ObjectEntry *newEntry = NULL;
 	if (NULL != objEntry.objPtr) {
 		uintptr_t consumedSize = env->getExtensions()->objectModel.getConsumedSizeInBytesWithHeader(objEntry.objPtr);

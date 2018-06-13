@@ -64,7 +64,7 @@ public:
 	/**
 	 * Basic array constructor obviates need for stdlibc++ linkage in gc component libraries. Array
 	 * is allocated from forge as contiguous block sized to contain requested number of elements and
-	 * must be freed using MM_Forge::free() when no longer needed.
+	 * must be freed using MM_Forge::free() when no longer needed. See MM_Evacuator::tearDown().
 	 *
 	 * @param count the number of aray elements to instantiate
 	 * @return a pointer to instantiated array
