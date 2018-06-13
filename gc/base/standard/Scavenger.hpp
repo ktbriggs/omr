@@ -218,7 +218,7 @@ public:
 	MMINLINE bool scavengeObjectSlots(MM_EnvironmentStandard *env, MM_CopyScanCacheStandard *scanCache, omrobjectptr_t objectPtr, uintptr_t flags, omrobjectptr_t *rememberedSetSlot);
 	MMINLINE MM_CopyScanCacheStandard *incrementalScavengeObjectSlots(MM_EnvironmentStandard *env, omrobjectptr_t objectPtr, MM_CopyScanCacheStandard* scanCache);
 
-	MMINLINE bool scavengeRememberedObject(MM_EnvironmentStandard *env, omrobjectptr_t objectPtr);
+	MMINLINE bool scavengeRememberedObject(MM_EnvironmentStandard *env, omrobjectptr_t objectPtr, omrobjectptr_t *rememberSetSlot);
 	void scavengeRememberedSetList(MM_EnvironmentStandard *env);
 	void scavengeRememberedSetOverflow(MM_EnvironmentStandard *env);
 	MMINLINE void flushRememberedSet(MM_EnvironmentStandard *env);

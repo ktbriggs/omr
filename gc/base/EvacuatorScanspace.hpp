@@ -64,9 +64,9 @@ public:
 	/**
 	 * Basic array constructor obviates need for stdlibc++ linkage in gc component libraries. Array
 	 * is allocated from forge as contiguous block sized to contain requested number of elements and
-	 * must be freed using MM_Forge::free() when no longer needed.
+	 * must be freed using MM_Forge::free() when no longer needed. See MM_Evacuator::tearDown().
 	 *
-	 * @param count the number of aray elements to instantiate
+	 * @param count the number of array elements to instantiate
 	 * @return a pointer to instantiated array
 	 */
 	static MM_EvacuatorScanspace *
@@ -85,75 +85,83 @@ public:
 	}
 
 	/*
-	 * Current or latent object scanner is instantiated in space reserved within containing scanspace.
+	 * Current or latent object scanner is instantiated in space reserved within containing scanspace. This
+	 * method should only be called when caller is committed to use the returned pointer for this purpose.
 	 *
-	 * @see MM_EvacuatorDelegate::getObjectScanner()
+	 * To get current pointer to active object scanner, which may be NULL, use getObjectScanner().
+	 *
+	 * @see getActiveObjectScanner()
 	 */
-	MMINLINE GC_ObjectScannerState *getObjectScannerState() { return &_objectScannerState; }
+	GC_ObjectScannerState *getObjectScannerState() { _objectScanner = (GC_ObjectScanner *)&_objectScannerState; return &_objectScannerState; }
 
 	/**
-	 *  Set pointer to instantiated object scanner. Non-null inputs will be overridden with scanspace
-	 *  own object scanner state.
+	 * Return pointer to active object scanner, or NULL if object scanner not instantiated.
 	 */
-	MMINLINE void 
-	setObjectScanner(GC_ObjectScanner *objectScanner)
+	GC_ObjectScanner *getActiveObjectScanner() { return _objectScanner; }
+
+	/**
+	 * Advance the scan pointer to next unscanned object and drop active object scanner.
+	 *
+	 * @param scannedBytes number of bytes scanned (size of scanned object)
+	 */
+	GC_ObjectScanner *
+	advanceScanHead(uintptr_t scannedBytes)
 	{
-		_objectScanner = (NULL != objectScanner) ? (GC_ObjectScanner *)getObjectScannerState() : NULL;
-	}
+		/* split array segment or current object, if any, has been completely scanned */
+		if (_scan < _copy) {
+			/* scan head for split array scanspaces is preset to copy head so this is necessary only for scalars and non-split arrays */
+			_scan += scannedBytes;
+		}
 
-	/**
-	 * Return pointer to instantiated object scanner, or NULL if object scanner not instantiated.
-	 */
-	MMINLINE GC_ObjectScanner *getObjectScanner() { return _objectScanner; }
+		/* done with current object scanner */
+		_objectScanner = NULL;
+
+		return _objectScanner;
+	}
 
 	/**
 	 * Return the position of the scan head
 	 */
-	MMINLINE uint8_t *getScanHead() { return _scan; }
+	uint8_t *getScanHead() { return _scan; }
 
 	/**
 	 * Return the position of the copy limit. No more objects can be laid down once the limit
 	 * has been reached or passed.
 	 */
-	MMINLINE uint8_t *getCopyLimit() { return _limit; }
+	uint8_t *getCopyLimit() { return _limit; }
 
 	/**
 	 * Return the number of bytes of remaining whitespace between copy head and limit
 	 */
-	MMINLINE uintptr_t getLimitedSize() { return (_limit > _copy) ? (uintptr_t)(_limit - _copy) : 0; }
+	uintptr_t getLimitedSize() { return (_limit > _copy) ? (uintptr_t)(_limit - _copy) : 0; }
 
 	/**
 	 * Return the number of bytes remaining to be scanned
 	 */
-	MMINLINE uintptr_t getUnscannedSize() { return (uintptr_t)(_copy - _scan); }
+	uintptr_t getUnscannedSize() { return (uintptr_t)(_copy - _scan); }
 
 	/**
 	 * Clear the remembered state (before starting to scan a new object)
 	 */
-	MMINLINE void clearRememberedState() { _flags &= ~(uintptr_t)isRememberedFlag; }
+	void clearRememberedState() { _flags &= ~(uintptr_t)isRememberedFlag; }
 
 	/**
 	 * Get the remembered state of the current object
 	 */
-	MMINLINE bool getRememberedState() { return isRememberedFlag == (_flags & (uintptr_t)isRememberedFlag); }
+	bool getRememberedState() { return isRememberedFlag == (_flags & (uintptr_t)isRememberedFlag); }
 
 	/**
 	 * Set the remembered state of the current object if it is tenured and has a referent in new space
 	 *
 	 * @param referentInSurvivor set this to true if the referent is in new space
 	 */
-	MMINLINE void 
+	void
 	updateRememberedState(bool referentInSurvivor)
 	{
 		if (referentInSurvivor) {
 			_flags |= (uintptr_t)isRememberedFlag;
 		}
 	}
-
-	/**
-	 * Test whether scanspace contains a split array segment
-	 */
-	MMINLINE bool isSplitArraySegment() { return isSplitArrayFlag == (_flags & (uintptr_t)isSplitArrayFlag); }
 
 	/**
 	 * Load whitespace or unscanned work to scan into this scanspace. If there is work it
@@ -163,15 +171,17 @@ public:
 	 * @param base points to start of unscanned work
 	 * @param copy points to whitespace at copy head
 	 * @param length extent in bytes of unscanned work at base
+	 * @param inside max object length for inside copying
+	 * @param isLOA true if space is in large object area (LOA)
 	 */
-	MMINLINE void
-	setScanspace(uint8_t *base, uint8_t *copy, uintptr_t length, bool isLOA = false)
+	void
+	setScanspace(uint8_t *base, uint8_t *copy, uintptr_t length, uintptr_t inside, bool isLOA = false)
 	{
 		setCopyspace(base, copy, length, isLOA);
 		_scan = _base;
 		if (NULL != _scan) {
-			/* set the copy limit at next page boundary */
-			_limit = (uint8_t *)((uintptr_t)(_scan + MM_EvacuatorBase::inside_copy_size + MM_EvacuatorBase::max_inside_object_size) & ~MM_EvacuatorBase::inside_copy_mask);
+			/* set the copy limit at next frame boundary */
+			_limit = (uint8_t *)MM_Math::roundToFloor(MM_EvacuatorBase::inside_frame_width, (uintptr_t)_scan + MM_EvacuatorBase::inside_frame_width + inside);
 			/* adjust limit to copy/end bounds */
 			if (_limit < _copy) {
 				_limit = _copy;
@@ -191,17 +201,17 @@ public:
 	 * Load a split array segment into this scanspace.
 	 *
 	 * @param base points to indexable object containing the segment
-	 * @param base points after end of contiguous indexable object containing the segment
+	 * @param end points after end of contiguous indexable object containing the segment
 	 * @param scanner the object scanner preset to scan the array segment
 	 */
-	MMINLINE void
+	void
 	setSplitArrayScanspace(uint8_t *base, uint8_t *end, GC_IndexableObjectScanner *scanner)
 	{
 		setCopyspace(base, end, (uintptr_t)(end - base));
 		_scan = _end;
 		_limit = _end;
 		_flags |= isSplitArrayFlag;
-		
+
 		Debug_MM_true((base == _base) && (_limit == _scan) && (_scan == _copy) &&(_copy == _end) && (_end == end));
 
 		clearRememberedState();
@@ -209,26 +219,48 @@ public:
 	}
 
 	/**
-	 * Advance the scan pointer to next unscanned object.
-	 *
-	 * @param scannedBytes number of bytes scanned (size of scanned object)
+	 * Test whether scanspace contains a split array segment
 	 */
-	MMINLINE void
-	advanceScanHead(uintptr_t scannedBytes)
+	bool isSplitArraySegment() { return isSplitArrayFlag == (_flags & (uintptr_t)isSplitArrayFlag); }
+
+	/**
+	 * Pull work from an outside copyspace leaving it empty of work and retaining whitespace
+	 *
+	 * @param fromspace the source copyspace
+	 */
+	void
+	pullWork(MM_EvacuatorCopyspace *fromspace)
 	{
-		/* split array segment or current object, if any, has been completely scanned */
-		if (_scan < _copy) {
-			/* scan head for split arrays is preset to copy head so this is necessary only for scalars and non-split arrays */
-			_scan += scannedBytes;
-		}
-		/* done with current object scanner */
+		/* pull work from copyspace into this scanspace and rebase copyspace to copy head */
+		_base = _scan = fromspace->rebase();
+		_copy = _limit = _end = fromspace->getCopyHead();
+		_flags = fromspace->isLOA() ? isLOAFlag : 0;
+
+		/* reset remembered state and passivate active scanner */
+		clearRememberedState();
 		_objectScanner = NULL;
+	}
+
+	/**
+	 * Pull whitespace from another scanspace
+	 *
+	 * @param fromspace the other scanspace
+	 * @param inside max object length for inside copying
+	 */
+	void
+	pullWhitespace(MM_EvacuatorScanspace *fromspace, uintptr_t inside)
+	{
+		/* pull whitespace at end of fromspace into this scanspace */
+		setScanspace(fromspace->_copy, fromspace->_copy, fromspace->getWhiteSize(), inside, fromspace->isLOA());
+
+		/* trim tail of fromspace and leave base, scan and flags as they are */
+		fromspace->_end = fromspace->_limit = fromspace->_copy;
 	}
 
 	/**
 	 * This overloads copyspace trim() to set scanspace limit at copy head.
 	 */
-	MMINLINE MM_EvacuatorWhitespace *
+	MM_EvacuatorWhitespace *
 	clip()
 	{
 		MM_EvacuatorWhitespace *whitespace = trim();
@@ -237,6 +269,11 @@ public:
 		}
 		return whitespace;
 	}
+
+	/*
+	 * Reset this scanspace to an empty state
+	 */
+	void resetScanspace() { setScanspace(NULL, NULL, 0, 0, false); }
 
 	/**
 	 * Constructor

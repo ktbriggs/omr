@@ -232,6 +232,7 @@ public:
 	{ }
 
 #if defined(EVACUATOR_DEBUG_DELEGATE)
+	bool isValidObject(omrobjectptr_t objectptr) { return true; }
 	void debugValidateObject(omrobjectptr_t objectptr) { }
 	void debugValidateObject(MM_ForwardedHeader *forwardedHeader) { }
 	const char *

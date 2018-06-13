@@ -72,34 +72,52 @@ MM_EvacuatorParallelTask::cleanup(MM_EnvironmentBase *envBase)
 	}
 }
 
-#if defined(J9MODRON_TGC_PARALLEL_STATISTICS)
+#if defined(J9MODRON_TGC_PARALLEL_STATISTICS) || defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 void
 MM_EvacuatorParallelTask::synchronizeGCThreads(MM_EnvironmentBase *envBase, const char *id)
 {
 	MM_EnvironmentStandard *env = MM_EnvironmentStandard::getEnvironment(envBase);
+
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
+	_controller->waitToSynchronize(env->getEvacuator(), id);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
+
 	OMRPORT_ACCESS_FROM_OMRPORT(envBase->getPortLibrary());
 	uint64_t startTime = omrtime_hires_clock();
-	_controller->waitToSynchronize(env->getEvacuator(), id);
 	MM_ParallelTask::synchronizeGCThreads(env, id);
 	uint64_t endTime = omrtime_hires_clock();
-	_controller->continueAfterSynchronizing(env->getEvacuator(), startTime, endTime, id);
 
+#if defined(J9MODRON_TGC_PARALLEL_STATISTICS)
 	env->_scavengerStats.addToSyncStallTime(startTime, endTime);
+#endif /* defined(J9MODRON_TGC_PARALLEL_STATISTICS) */
+
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
+	_controller->continueAfterSynchronizing(env->getEvacuator(), startTime, endTime, id);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 }
 
 bool
 MM_EvacuatorParallelTask::synchronizeGCThreadsAndReleaseMaster(MM_EnvironmentBase *envBase, const char *id)
 {
 	MM_EnvironmentStandard *env = MM_EnvironmentStandard::getEnvironment(envBase);
+
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
+	_controller->waitToSynchronize(env->getEvacuator(), id);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
+
 	OMRPORT_ACCESS_FROM_OMRPORT(envBase->getPortLibrary());
 	uint64_t startTime = omrtime_hires_clock();
-	_controller->waitToSynchronize(env->getEvacuator(), id);
-
 	bool result = MM_ParallelTask::synchronizeGCThreadsAndReleaseMaster(env, id);
 	uint64_t endTime = omrtime_hires_clock();
+
+#if defined(J9MODRON_TGC_PARALLEL_STATISTICS)
 	env->_scavengerStats.addToSyncStallTime(startTime, endTime);
-	
+#endif /* defined(J9MODRON_TGC_PARALLEL_STATISTICS) */
+
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 	_controller->continueAfterSynchronizing(env->getEvacuator(), startTime, endTime, id);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
+
 	return result;	
 }
 
@@ -107,18 +125,27 @@ bool
 MM_EvacuatorParallelTask::synchronizeGCThreadsAndReleaseSingleThread(MM_EnvironmentBase *envBase, const char *id)
 {
 	MM_EnvironmentStandard *env = MM_EnvironmentStandard::getEnvironment(envBase);
+
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
+	_controller->waitToSynchronize(env->getEvacuator(), id);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
+
 	OMRPORT_ACCESS_FROM_OMRPORT(envBase->getPortLibrary());
 	uint64_t startTime = omrtime_hires_clock();
-	_controller->waitToSynchronize(env->getEvacuator(), id);
-
 	bool result = MM_ParallelTask::synchronizeGCThreadsAndReleaseSingleThread(env, id);
 	uint64_t endTime = omrtime_hires_clock();
-	env->_scavengerStats.addToSyncStallTime(startTime, endTime);
 
+#if defined(J9MODRON_TGC_PARALLEL_STATISTICS)
+	env->_scavengerStats.addToSyncStallTime(startTime, endTime);
+#endif /* defined(J9MODRON_TGC_PARALLEL_STATISTICS) */
+
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 	_controller->continueAfterSynchronizing(env->getEvacuator(), startTime, endTime, id);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
+
 	return result;
 }
 
-#endif /* J9MODRON_TGC_PARALLEL_STATISTICS */
+#endif /* defined(J9MODRON_TGC_PARALLEL_STATISTICS) || defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 
 #endif /* defined(OMR_GC_MODRON_SCAVENGER) */

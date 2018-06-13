@@ -59,7 +59,7 @@ public:
 	virtual void setup(MM_EnvironmentBase *env);
 	virtual void cleanup(MM_EnvironmentBase *env);
 
-#if defined(J9MODRON_TGC_PARALLEL_STATISTICS)
+#if defined(J9MODRON_TGC_PARALLEL_STATISTICS) || defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 	/**
 	 * Override to collect stall time statistics.
 	 * @see MM_ParallelTask::synchronizeGCThreads
@@ -77,7 +77,7 @@ public:
 	 * @see MM_ParallelTask::synchronizeGCThreadsAndReleaseSingleThread
 	 */
 	virtual bool synchronizeGCThreadsAndReleaseSingleThread(MM_EnvironmentBase *env, const char *id);
-#endif /* J9MODRON_TGC_PARALLEL_STATISTICS */
+#endif /* defined(J9MODRON_TGC_PARALLEL_STATISTICS) || defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 
 	/**
 	 * Create a ParallelScavengeTask object.

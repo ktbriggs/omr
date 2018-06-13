@@ -59,7 +59,7 @@ public:
 	/**
 	 * Basic array constructor obviates need for stdlibc++ linkage in gc component libraries. Array
 	 * is allocated from forge as contiguous block sized to contain requested number of elements and
-	 * must be freed using MM_Forge::free() when no longer needed.
+	 * must be freed using MM_Forge::free() when no longer needed. See MM_Evacuator::tearDown().
 	 *
 	 * @param count the number of aray elements to instantiate
 	 * @return a pointer to instantiated array
@@ -82,39 +82,39 @@ public:
 	/**
 	 * Get the location of the base of the copyspace
 	 */
-	MMINLINE uint8_t *getBase() { return _base; }
+	uint8_t *getBase() { return _base; }
 
 	/**
 	 * Get the location of the copy head
 	 */
-	MMINLINE uint8_t *getCopyHead() { return _copy; }
+	uint8_t *getCopyHead() { return _copy; }
 
 	/**
 	 * Get the location of the end of the copyspace
 	 */
-	MMINLINE uint8_t *getEnd() { return _end; }
+	uint8_t *getEnd() { return _end; }
 
 	/**
 	 * Return the number of bytes free to receive copy
 	 */
-	MMINLINE uintptr_t getWhiteSize() { return (uintptr_t)(_end - _copy); }
+	uintptr_t getWhiteSize() { return (uintptr_t)(_end - _copy); }
 
 	/**
 	 * Return the number of bytes that hold copied material
 	 */
-	MMINLINE uintptr_t getWorkSize() { return (uintptr_t)(_copy - _base); }
+	uintptr_t getWorkSize() { return (uintptr_t)(_copy - _base); }
 
 	/**
 	 * Return the total number of bytes spanned by copyspace (copysize + freesize)
 	 */
-	MMINLINE uintptr_t getTotalSize() { return (uintptr_t)(_end - _base); }
+	uintptr_t getTotalSize() { return (uintptr_t)(_end - _base); }
 
 	/**
 	 * Set/test copyspace for containment in large object area
 	 */
-	MMINLINE bool isLOA() { return (uintptr_t)isLOAFlag == ((uintptr_t)isLOAFlag & _flags); }
+	bool isLOA() { return (uintptr_t)isLOAFlag == ((uintptr_t)isLOAFlag & _flags); }
 
-	MMINLINE void setLOA(bool isLOA)
+	void setLOA(bool isLOA)
 	{
 		if (isLOA) {
 			_flags |= (uintptr_t)isLOAFlag;
@@ -126,7 +126,7 @@ public:
 	/**
 	 * Load free memory into the copyspace. The copyspace must be empty before the call.
 	 */
-	MMINLINE void
+	void
 	setCopyspace(uint8_t *base, uint8_t *copy, uintptr_t length, bool isLOA = false)
 	{
 		_base = base;
@@ -137,17 +137,27 @@ public:
 		Debug_MM_true((_base <= _copy) && (_copy <= _end));
 	}
 
+	/*
+	 * Reset this copyspace to an empty state
+	 */
+	void resetCopyspace() { setCopyspace(NULL, NULL, 0, false); }
+
 	/**
 	 * Advance the copy pointer to end of most recently copied object.
 	 *
 	 * @param copiedBytes number of bytes copied (consumed size of most recently copied object)
 	 * @return pointer to the new copy head (location that will receive next object)
 	 */
-	MMINLINE void
+	void
 	advanceCopyHead(uintptr_t copiedBytes)
 	{
 		_copy += copiedBytes;
 	}
+
+	/**
+	 * Clear work from this copyspace retaining whitespace.
+	 */
+	uint8_t *rebase() { uint8_t *base = _base; _base = _copy; return base; }
 
 	/**
 	 * Split current contents, returning a pointer to and length of current copied material. The
@@ -156,14 +166,14 @@ public:
 	 * @param length pointer to location that will receive length (bytes) of work split from head
 	 * @return pointer to work split from head, or NULL
 	 */
-	MMINLINE uint8_t *
+	uint8_t *
 	rebase(uintptr_t *length)
 	{
 		uint8_t *work = NULL;
 		*length = getWorkSize();
 		if (0 < *length) {
 			work = _base;
-			_base = _copy;
+			rebase();
 		}
 		return work;
 	}
@@ -173,7 +183,7 @@ public:
 	 *
 	 * @return whitespace from end of copyspace, or NULL if none available
 	 */
-	MMINLINE MM_EvacuatorWhitespace *
+	MM_EvacuatorWhitespace *
 	trim()
 	{
 		MM_EvacuatorWhitespace *freespace = NULL;

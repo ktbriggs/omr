@@ -46,6 +46,11 @@
  * and allows scanning for most objects (<32/64 slots) to complete inline, without
  * requiring a virtual method call (getNextSlotMap()). Otherwise at least one such call
  * is required before getNextSlot() will return NULL.
+ *
+ * Note that this is a hot object, so field organization to maximize cache localization
+ * is important. The _scanMap, _scanPtr, and _slotObject fields the most frequently used
+ * and they are frequently used together, so they are grouped together at the head of the
+ * object.
  */
 class GC_ObjectScanner : public MM_BaseVirtual
 {
@@ -61,8 +66,9 @@ protected:
 #if defined(OMR_GC_LEAF_BITS)
 	uintptr_t _leafMap;						/**< Bit map of reference slots in object that refernce leaf objects */
 #endif /* defined(OMR_GC_LEAF_BITS) */
-	uintptr_t _flags;						/**< Scavenger context flags (scanRoots, scanHeap, ...) */
-	uintptr_t _hotFieldsDescriptor;			/**< Hot fields descriptor for languages that support hot field tracking */
+	uintptr_t _flags;						/**< Scanning context flags (scanRoots, scanHeap, ...) */
+	fomrobject_t *_hotScanPtr;				/**< Saved value of initial _scaanPtr if there is a hot field */
+	uintptr_t _hotSlotDescriptor;			/**< If >0 this is a bitmap that selects 1 slot in the initial slot map to be returned as first slot */
 	omrobjectptr_t const _parentObjectPtr;	/**< Object being scanned */
 	
 public:
@@ -77,6 +83,8 @@ public:
 		, indexableObjectNoSplit = 8	/* this is set for array object scanners where the array elements cannot be partitioned for multithreaded scanning */
 		, headObjectScanner = 16		/* this is set for array object scanners containing the elements from the first split segment, and for all non-indexable objects */
 		, noMoreSlots = 128				/* this is set when object has more no slots to scan past current bitmap */
+		, preselectHotSlot = 256		/* preselect a hot field slot as first slot to return if any fields are hot */
+		, publicFlagsBase = 1 << 16		/* subclasses may define additional flags in high-order bits */
 	};
 
 	/* Member Functions */
@@ -84,9 +92,14 @@ private:
 
 protected:
 	/**
-	 * Constructor. Without leaf optimization. Context generational nursery collection.
+	 * Constructor accepts 2 (or 3) bitmaps, each of which relate to the same contiguous segment of fomrobject_t 
+	 * slots. The initial scanMap describes the locations of slots that may contain references to other heap 
+	 * objects, within the segment that contains the object header. If leaf optimization is enabled the leafMap
+	 * is a subset of the scanMap identifying slots that referent leaf objects (which contain no reference
+	 * slots). The hotFieldDescriptor is a subset of scanMap that can be used to preselect a reference slot 
+	 * other than the default (closest to object header) slot as the first slot to scan. 
 	 *
-	 * For marking context with leaf optimization see below:
+	 * For marking context with leaf optimization see below.
 	 *
 	 * GC_ObjectScanner(MM_EnvironmentBase *, omrobjectptr_t, fomrobject_t *, uintptr_t, uintptr_t, uintptr_t, uintptr_t)
 	 *
@@ -95,9 +108,9 @@ protected:
 	 * @param[in] scanPtr The first slot contained in the object to be scanned
 	 * @param[in] scanMap Bit map marking object reference slots, with least significant bit mapped to slot at scanPtr
 	 * @param[in] flags A bit mask comprised of InstanceFlags
-	 * @param[in] hotFieldsDescriptor Hot fields descriptor for languages that support hot field tracking (0 if no hot fields support)
+	 * @param[in] hotSlotDescriptor Least significant set bit will select first slot to return (0 selects slot closest to object header)
 	 */
-	GC_ObjectScanner(MM_EnvironmentBase *env, omrobjectptr_t parentObjectPtr, fomrobject_t *scanPtr, uintptr_t scanMap, uintptr_t flags, uintptr_t hotFieldsDescriptor = 0)
+	GC_ObjectScanner(MM_EnvironmentBase *env, omrobjectptr_t parentObjectPtr, fomrobject_t *scanPtr, uintptr_t scanMap, uintptr_t flags, uintptr_t hotSlotDescriptor = 0)
 		: MM_BaseVirtual()
 		, _scanMap(scanMap)
 		, _scanPtr(scanPtr)
@@ -106,7 +119,8 @@ protected:
 		, _leafMap(0)
 #endif /* defined(OMR_GC_LEAF_BITS) */
 		, _flags(flags | headObjectScanner)
-		, _hotFieldsDescriptor(hotFieldsDescriptor)
+		, _hotScanPtr(NULL)
+		, _hotSlotDescriptor(hotSlotDescriptor)
 		, _parentObjectPtr(parentObjectPtr)
 	{
 		_typeId = __FUNCTION__;
@@ -135,6 +149,19 @@ protected:
 	MMINLINE void
 	initialize(MM_EnvironmentBase *env)
 	{
+		if (isPreselectHotSlot()) {
+			uintptr_t hotField = (_scanMap & _hotSlotDescriptor);
+			if (0 != hotField) {
+				uintptr_t zeros = MM_Bits::leadingZeroes(hotField);
+				_slotObject.writeAddressToSlot(&_scanPtr[zeros]);
+				_scanMap &= ~((uintptr_t)1 << zeros);
+#if defined(OMR_GC_LEAF_BITS)
+				_leafMap &= ~((uintptr_t)1 << zeros);
+#endif /* defined(OMR_GC_LEAF_BITS) */
+				_hotScanPtr = _scanPtr;
+				_scanPtr = NULL;
+			}
+		}
 	}
 
 	/**
@@ -173,9 +200,6 @@ public:
 	 */
 	MMINLINE bool isLeafObject() { return (0 == _scanMap) && !hasMoreSlots(); }
 
-
-	MMINLINE uintptr_t getHotFieldsDescriptor() { return _hotFieldsDescriptor; }
-
 	/**
 	 * Return base pointer and slot bit map for next block of contiguous slots to be scanned. The
 	 * base pointer must be fomrobject_t-aligned. Bits in the bit map are scanned in order of
@@ -198,7 +222,7 @@ public:
 	{
 		while (NULL != _scanPtr) {
 			/* while there is at least one bit-mapped slot, advance scan ptr to a non-NULL slot or end of map */
-			while ((0 != _scanMap) && ((0 == (1 & _scanMap)) || (0 == *_scanPtr))) {
+			while ((0 != _scanMap) && ((0 == ((uintptr_t)1 & _scanMap)) || (0 == *_scanPtr))) {
 				_scanPtr += 1;
 				_scanMap >>= 1;
 			}
@@ -220,6 +244,13 @@ public:
 			} else {
 				_scanPtr = NULL;
 			}
+		}
+
+		if (NULL != _hotScanPtr) {
+			/* restore the scan pointer and return hot slot found in initialize() */
+			_scanPtr = _hotScanPtr;
+			_hotScanPtr = NULL;
+			return &_slotObject;
 		}
 
 		return NULL;
@@ -277,7 +308,7 @@ public:
 			if (0 != _scanMap) {
 				/* set up to return slot object for non-NULL slot at scan ptr and advance scan ptr */
 				_slotObject.writeAddressToSlot(_scanPtr);
-				isLeafSlot = (0 != (1 & _leafMap));
+				isLeafSlot = (0 != ((uintptr_t)1 & _leafMap));
 				_scanPtr += 1;
 				_scanMap >>= 1;
 				_leafMap >>= 1;
@@ -295,6 +326,14 @@ public:
 				_scanPtr = NULL;
 				setNoMoreSlots();
 			}
+		}
+
+		if (NULL != _hotScanPtr) {
+			/* restore the scan pointer and return hot slot found in initialize() */
+			isLeafSlot = (0 != (((uintptr_t)1 << (_hotScanPtr - _scanPtr)) & _leafMap));
+			_scanPtr = _hotScanPtr;
+			_hotScanPtr = NULL;
+			return &_slotObject;
 		}
 
 		isLeafSlot = true;
@@ -332,6 +371,10 @@ public:
 	MMINLINE void clearHeadObjectScanner() { _flags &= ~headObjectScanner; }
 
 	MMINLINE bool isHeadObjectScanner() { return (0 != (headObjectScanner & _flags)); }
+
+	MMINLINE void clearPreselectHotSlot() { _flags &= ~preselectHotSlot; }
+
+	MMINLINE bool isPreselectHotSlot() { return (0 != (preselectHotSlot & _flags)); }
 };
 
 #endif /* OBJECTSCANNER_HPP_ */
