@@ -33,19 +33,32 @@
 #include "EvacuatorBase.hpp"
 #include "GCExtensionsBase.hpp"
 #include "HeapLinkedFreeHeader.hpp"
+#include "MemoryPoolAddressOrderedList.hpp"
 #include "MemorySubSpace.hpp"
 #include "ObjectModelBase.hpp"
 #include "ScavengerStats.hpp"
 /**
- * Free space reserved from survivor or tenure to receive matter copied from evacuation space. The
- * length in bytes is stored at the location of the free space.
+ * Free space reserved from survivor or tenure to receive matter copied from evacuation space is represented as a
+ * heap linked free header to ensure the heap is walkable. For nontrivial (length > sizeof(MM_HeapLinkedFreeHeader))
+ * whitespace a 64-bit word is installed to hold status flags and an eye catcher pattern as an aid to debugging. The
+ * eye catcher pattern is inverted when/if the whitespace is reclaimed for reuse by the evacuator.
  */
 class MM_EvacuatorWhitespace : public MM_HeapLinkedFreeHeader {
 	/*
 	 * Data members
 	 */
 private:
-	uintptr_t _isLOA;
+	/* eyecatcher/loa flag bits are included only for multislot whitespace (ie, when sizeof(MM_EvacuatorWhitespace) <= MM_HeapLinkedFreeHeader::_size) */
+	static const uint32_t _eyeCatcher = 0x5353535C;
+
+	typedef enum WhitespaceFlags {
+		flagLOA = 1
+		, flagDiscarded = 2
+	} WhitespaceFlags;
+
+	/* four low order bits are 0xCxy store discarded x=~a and LOA y=~b bits, the high order bits are all eyecatcher 535353(xy) or inverted ACACAC(ab) when reused */
+	uint32_t _flags;
+	uint32_t _pad64;
 protected:
 public:
 	/*
@@ -54,25 +67,54 @@ public:
 private:
 protected:
 public:
-	MMINLINE static MM_EvacuatorWhitespace *
+	static MM_EvacuatorWhitespace *
 	whitespace(void *address, uintptr_t length, bool isLOA = false)
 	{
-		Debug_MM_true(length >= sizeof(fomrobject_t));
+		/* trivial whitespace (length < sizeof(MM_EvacuatorWhitespace)) is always discarded as a heap hole */
 		MM_EvacuatorWhitespace *freespace = (MM_EvacuatorWhitespace *)fillWithHoles(address, length);
 		if (sizeof(MM_EvacuatorWhitespace) <= length) {
-			freespace->_isLOA = (isLOA ? 1 : 0);
+			freespace->_flags = _eyeCatcher | (isLOA ? (uint32_t)flagLOA : 0);
+		} else {
+			freespace = NULL;
 		}
 		return freespace;
 	}
 
-	MMINLINE bool isLOA() { return (1 == _isLOA); }
+	uintptr_t length() { return _size; }
 
-	MMINLINE uintptr_t length() { return _size; }
+	uint8_t *getBase() { return (uint8_t *)this; }
 
-	MMINLINE void clear() { _next = 0; }
+	uint8_t *getEnd() { return getBase() + length(); }
+
+	bool isLOA() { return (sizeof(MM_EvacuatorWhitespace) <= length()) && ((uint32_t)flagLOA == ((uint32_t)flagLOA & _flags)); }
+
+	bool isReused() { return (sizeof(MM_EvacuatorWhitespace) > length()) || (_eyeCatcher != (_eyeCatcher & _flags)); }
+
+	bool isDiscarded() { return (sizeof(MM_EvacuatorWhitespace) > length()) || ((uint32_t)flagDiscarded == ((uint32_t)flagDiscarded & _flags)); }
+
+	void
+	clear()
+	{
+		/* this whitespace is being reused by the evacuator */
+		if (sizeof(MM_EvacuatorWhitespace) <= length()) {
+			/* flip the eyecatcher bits to ACACACACACACACACAx where (x & 3) preserves discarded and LOA flags */
+			_flags ^= ~(uint32_t)0x3;
+		}
+		_next = 0;
+	}
+
+	void
+	discard()
+	{
+		/* this whitespace is being discarded by the evacuator without reuse */
+		if (sizeof(MM_EvacuatorWhitespace) <= length()) {
+			/* set the discarded bit to indicate that whitespace was discarded */
+			_flags |= (uint32_t)flagDiscarded;
+		}
+	}
 
 #if defined(EVACUATOR_DEBUG)
-	MMINLINE static void
+	static void
 	poison(MM_EvacuatorWhitespace *whitespace)
 	{
 		if (whitespace->length() > sizeof(MM_EvacuatorWhitespace)) {
@@ -101,6 +143,7 @@ private:
 	uintptr_t _flushed;														/* cumulative sum of bytes flushed as heap holes */
 	MM_EnvironmentBase * _env;												/* for port library access for discard trace */
 	MM_MemorySubSpace *_subspace;											/* memory subspace receives discarded fragments */
+	MM_MemoryPoolAddressOrderedList *_memoryPool;							/* HACK: this assumes AOL memory pool */
 	MM_ScavengerStats *_stats;												/* pointer to _env->_scavengerStats */
 	uintptr_t _index;														/* evacuator worker index for discard trace */
 	bool _tenure;															/* true if managing tenure whitespace */
@@ -115,21 +158,21 @@ public:
  * Function members
  */
 private:
-	MMINLINE bool odd(uintptr_t n) { return (1 == (n & (uintptr_t)1)); }
+	bool odd(uintptr_t n) { return (1 == (n & (uintptr_t)1)); }
 
 	/* left and right children of element n */
-	MMINLINE uintptr_t left(uintptr_t n) { return (n << 1) + 1; }
-	MMINLINE uintptr_t right(uintptr_t n) { return (n << 1) + 2; }
+	uintptr_t left(uintptr_t n) { return (n << 1) + 1; }
+	uintptr_t right(uintptr_t n) { return (n << 1) + 2; }
 
 	/* parent of element n -- parent(0) is undefined */
-	MMINLINE uintptr_t parent(uintptr_t n) { return (n - 1) >> 1; }
+	uintptr_t parent(uintptr_t n) { return (n - 1) >> 1; }
 
 	/* comparators for free space pointers in array */
-	MMINLINE bool lt(uintptr_t a, uintptr_t b) { return _whitelist[a]->length() < _whitelist[b]->length(); }
-	MMINLINE bool le(uintptr_t a, uintptr_t b) { return lt(a, b) || (_whitelist[a]->length() == _whitelist[b]->length()); }
+	bool lt(uintptr_t a, uintptr_t b) { return _whitelist[a]->length() < _whitelist[b]->length(); }
+	bool le(uintptr_t a, uintptr_t b) { return lt(a, b) || (_whitelist[a]->length() == _whitelist[b]->length()); }
 
 	/* swap free space pointers in array */
-	MMINLINE void swap(uintptr_t a, uintptr_t b)
+	void swap(uintptr_t a, uintptr_t b)
 	{
 		MM_EvacuatorWhitespace *temp = _whitelist[a];
 		_whitelist[a] = _whitelist[b];
@@ -137,46 +180,22 @@ private:
 	}
 
 #if defined(EVACUATOR_DEBUG)
-	MMINLINE void
-	verify()
-	{
-		uintptr_t volume = 0;
-		if (_debugger->isDebugWhitelists()) {
-			Debug_MM_true((MM_EvacuatorBase::max_whitelist == _count) || (NULL == _tail));
-			Debug_MM_true(((0 == _count) && (NULL == _whitelist[0])) || (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >= _whitelist[0]->length()));
-			for (uintptr_t i = 0; i < _count; i += 1) {
-				Debug_MM_true(NULL != _whitelist[i]);
-				Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder <= _whitelist[i]->length());
-				Debug_MM_true(0  == ((sizeof(_whitelist[i]->length()) - 1) & _whitelist[i]->length()));
-				Debug_MM_true((0 == i) || le(i, parent(i)));
-				volume += _whitelist[i]->length();
-			}
-			uintptr_t end = _count >> 1;
-			for (uintptr_t j = 0; j < end; j += 1) {
-				Debug_MM_true(le(left(j), j));
-				Debug_MM_true((right(j) >=_count) || le(right(j), j));
-				Debug_MM_true((NULL == _tail) || (_whitelist[j]->length() >= _tail->length()));
-			}
-			Debug_MM_true(volume == _volume);
-		}
-	}
-
-	MMINLINE void
+	void
 	clean()
 	{
 		for (uintptr_t i = 0; i < _count; i += 1) {
 			Debug_MM_true(_env->getExtensions()->objectModel.isDeadObject((void *)_whitelist[i]));
-			Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder <= _whitelist[i]->length());
+			Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder < _whitelist[i]->length());
 			Debug_MM_true(NULL == _whitelist[i]->getNext());
 		}
 		if (NULL != _tail) {
 			Debug_MM_true(_env->getExtensions()->objectModel.isDeadObject((void *)_tail));
-			Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder <= _tail->length());
+			Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder < _tail->length());
 			Debug_MM_true(NULL == _tail->getNext());
 		}
 	}
 
-	MMINLINE void
+	void
 	debug(MM_EvacuatorWhitespace *whitespace, const char* op)
 	{
 		if (_debugger->isDebugWhitelists()) {
@@ -184,10 +203,10 @@ private:
 			char buf[512];
 			uintptr_t sum = 0;
 			uintptr_t len = omrstr_printf(buf, 512, "%5lu    %2llu:%7s[%c]; address:%llx; length:%llx; count:%llx; volume:%llx; top:%llx; tail:%llx; discarded:%llx; flushed:%llx;",
-					_env->_scavengerStats._gcCount, _index, op, (_tenure ? 'T' : 'S'), (uintptr_t)whitespace, ((NULL !=  whitespace) ? whitespace->length() : 0), _count, _volume,
-					((NULL !=  _whitelist[0]) ? _whitelist[0]->length() : 0), ((NULL != _tail) ? _tail->length() : 0), _discarded, _flushed);
+					_env->_scavengerStats._gcCount, (uint64_t)_index, op, (_tenure ? 'T' : 'S'), (uint64_t)whitespace, (uint64_t)((NULL !=  whitespace) ? whitespace->length() : 0), (uint64_t)_count, (uint64_t)_volume,
+					(uint64_t)((NULL !=  _whitelist[0]) ? _whitelist[0]->length() : 0), (uint64_t)((NULL != _tail) ? _tail->length() : 0), (uint64_t)_discarded, (uint64_t)_flushed);
 			for (uintptr_t i = 0; i < _count; i++) {
-				len += omrstr_printf(buf + len, 512 - len, " %llx", _whitelist[i]->length());
+				len += omrstr_printf(buf + len, 512 - len, " %llx", (uint64_t)_whitelist[i]->length());
 				sum += _whitelist[i]->length();
 			}
 			buf[len] = 0;
@@ -197,7 +216,7 @@ private:
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 
-	MMINLINE void
+	void
 	siftDown()
 	{
 		uintptr_t pos = 0;
@@ -218,7 +237,7 @@ private:
 		}
 	}
 
-	MMINLINE void
+	void
 	siftUp(uintptr_t bottom)
 	{
 		uintptr_t pos = bottom;
@@ -232,35 +251,46 @@ private:
 		}
 	}
 
-	MMINLINE void
+	void
 	discard(MM_EvacuatorWhitespace *discard, bool flushing = false)
 	{
-		/* tail holds largest discard from the whitelist (ie, tail is not longer than any whitespace in the whitelist) */
-		if (!flushing && (discard->length() > MM_EvacuatorBase::max_scanspace_remainder) &&
-				((NULL == _tail) || (discard->length() > _tail->length()))
-		) {
-			/* swap hole into tail and set up previous tail for discard */
-			MM_EvacuatorWhitespace *tail = _tail;
-			_tail = discard;
-			discard = tail;
-		}
+		uintptr_t discarded = (NULL != discard) ? discard->length() : 0;
+		if (0 < discarded) {
+			/* tail holds largest discard from the whitelist (ie, tail is not longer than any whitespace in the whitelist) */
+			if (!flushing && (discard->length() > MM_EvacuatorBase::max_scanspace_remainder) &&
+					((NULL == _tail) || (discard->length() > _tail->length()))
+			) {
+				/* swap hole into tail and set up previous tail for discard */
+				MM_EvacuatorWhitespace *tail = _tail;
+				_tail = discard;
+				if (NULL != tail) {
+					discarded = tail->length();
+					discard = tail;
+				} else {
+					return;
+				}
+			}
+			discard->discard();
 
-		/* fill discards with holes to keep runtime heap walkable */
-		uintptr_t discarded = 0;
-		if (NULL != discard) {
-			discarded = discard->length();
-			_subspace->abandonHeapChunk(discard, (void *)((uintptr_t)discard + discarded));
+			/* recycle or fill discards with holes to keep runtime heap walkable */
+			void *top = (void *)((uintptr_t)discard + discarded);
+			if (_tenure || !flushing || (MM_EvacuatorBase::min_recyclable_whitespace > discarded)) {
+				_subspace->abandonHeapChunk(discard, top);
+			} else if ((0 == discarded) || _memoryPool->recycleHeapChunk(discard, top)) {
+				return;
+			}
+
 			if (flushing) {
 				_flushed += discarded;
 			} else {
 				_discarded += discarded;
 			}
-		}
 
 #if defined(EVACUATOR_DEBUG)
-		verify();
-		debug(discard, flushing ? "flush" : "discard");
+			verify();
+			debug(discard, flushing ? "flush" : "discard");
 #endif /* defined(EVACUATOR_DEBUG) */
+		}
 	}
 
 protected:
@@ -268,7 +298,7 @@ public:
 	/**
 	 * Basic array constructor obviates need for stdlibc++ linkage in gc component libraries. Array
 	 * is allocated from forge as contiguous block sized to contain requested number of elements and
-	 * must be freed using MM_Forge::free() when no longer needed.
+	 * must be freed using MM_Forge::free() when no longer needed. See MM_Evacuator::tearDown().
 	 *
 	 * @param count the number of aray elements to instantiate
 	 * @return a pointer to instantiated array
@@ -291,22 +321,22 @@ public:
 	/**
 	 * Returns the number of whitespace elements in the list
 	 */
-	MMINLINE uintptr_t getSize() { return _count; }
+	uintptr_t getSize() { return _count; }
 
 	/**
 	 * Returns the number of whitespace bytes discarded (filled with holes)
 	 */
-	MMINLINE uintptr_t getDiscarded() { return VM_AtomicSupport::lockCompareExchange(&_discarded, _discarded, _discarded); }
+	uintptr_t getDiscarded() { return VM_AtomicSupport::lockCompareExchange(&_discarded, _discarded, _discarded); }
 
 	/**
 	 * Returns the number of whitespace bytes discarded (filled with holes)
 	 */
-	MMINLINE uintptr_t getFlushed() { return VM_AtomicSupport::lockCompareExchange(&_flushed, _flushed, _flushed); }
+	uintptr_t getFlushed() { return VM_AtomicSupport::lockCompareExchange(&_flushed, _flushed, _flushed); }
 
 	/**
 	 * Get the length of largest whitespace at top of whitelist
 	 */
-	MMINLINE uintptr_t top() { return (0 < _count) ? _whitelist[0]->length() : 0; }
+	uintptr_t top() { return (0 < _count) ? _whitelist[0]->length() : 0; }
 
 	/**
 	 * Takes largest whitespace from top and sifts down a small one from end of list to restore largest on top
@@ -314,7 +344,7 @@ public:
 	 * @param length the minimum number of bytes of whitespace required
 	 * @return whitespace with required capacity (length) or NULL if nothing available
 	 */
-	MMINLINE MM_EvacuatorWhitespace *
+	MM_EvacuatorWhitespace *
 	top(uintptr_t length)
 	{
 		MM_EvacuatorWhitespace *freespace = NULL;
@@ -350,16 +380,17 @@ public:
 	 * @param whitespace points to head of free space to add
 	 * @param length indicates size in bytes of free space
 	 */
-	MMINLINE void
+	void
 	add(MM_EvacuatorWhitespace *freespace)
 	{
 		if (NULL != freespace) {
 #if defined(EVACUATOR_DEBUG)
+			Debug_MM_true(_tenure == _env->getExtensions()->isOld((omrobjectptr_t)freespace));
 			MM_EvacuatorWhitespace *address = freespace;
 #endif /* defined(EVACUATOR_DEBUG) */
 			uintptr_t length = freespace->length();
 			/* any dropped free space bytes will be linked into a heap free header to keep heap walkable */
-			if (((NULL != _tail) ? _tail->length() : MM_EvacuatorBase::max_scanspace_remainder) <= length) {
+			if (((NULL != _tail) ? _tail->length() : MM_EvacuatorBase::max_scanspace_remainder) < length) {
 				/* assume the whitelist is not full and freespace will be appended at next leaf */
 				uintptr_t pos = _count;
 				if (_count == MM_EvacuatorBase::max_whitelist) {
@@ -401,19 +432,19 @@ public:
 	}
 
 	/**
-	 * Discards (fills with holes) all whitespace in current whitelist.
+	 * Discards (recycles or fills with holes) all whitespace in current whitelist.
 	 */
-	MMINLINE uintptr_t
-	flush(bool clearCountForTenure = false)
+	uintptr_t
+	flush()
 	{
 		MM_EvacuatorWhitespace *whitespace = top(0);
 		while (NULL != whitespace) {
-			Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder <= whitespace->length());
+			Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder < whitespace->length());
 			discard(whitespace, true);
 			whitespace = top(0);
 		}
 		if (NULL != _tail) {
-			Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder <= _tail->length());
+			Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder < _tail->length());
 			discard(_tail, true);
 			_tail = NULL;
 		}
@@ -422,9 +453,7 @@ public:
 		uintptr_t flushed = _flushed;
 		if (_tenure) {
 			_stats->_tenureDiscardBytes += _flushed;
-			if (clearCountForTenure) {
-				_flushed = 0;
-			}
+			_flushed = 0;
 		} else {
 			_stats->_flipDiscardBytes += _flushed;
 		}
@@ -432,12 +461,13 @@ public:
 		return flushed;
 	}
 
-	MMINLINE void
+	void
 	bind(MM_EvacuatorBase *debugger, MM_EnvironmentBase *env, uintptr_t evacuatorIndex, MM_MemorySubSpace *subspace, bool isTenure)
 	{
 		_env = env;
 		_index = evacuatorIndex;
 		_subspace = subspace;
+		_memoryPool = (MM_MemoryPoolAddressOrderedList *)_subspace->getMemoryPool();
 		_stats = &_env->_scavengerStats;
 		_discarded = 0;
 		if (!isTenure) {
@@ -459,6 +489,37 @@ public:
 #endif /* defined(EVACUATOR_DEBUG) */
 	}
 
+#if defined(EVACUATOR_DEBUG)
+	void
+	verify()
+	{
+		uintptr_t volume = 0;
+		if (_debugger->isDebugWhitelists()) {
+			Debug_MM_true((MM_EvacuatorBase::max_whitelist == _count) || (NULL == _tail));
+			Debug_MM_true(((0 == _count) && (NULL == _whitelist[0])) || (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >= _whitelist[0]->length()));
+			for (uintptr_t i = 0; i < _count; i += 1) {
+				Debug_MM_true(NULL != _whitelist[i]);
+				Debug_MM_true(0  == ((sizeof(_whitelist[i]->length()) - 1) & _whitelist[i]->length()));
+				Debug_MM_true(MM_EvacuatorBase::max_scanspace_remainder < _whitelist[i]->length());
+				Debug_MM_true(_env->getExtensions()->objectModel.isDeadObject((void *)_whitelist[i]));
+				Debug_MM_true(_env->getExtensions()->objectModel.getSizeInBytesDeadObject((omrobjectptr_t )_whitelist[i]) == _whitelist[i]->length());
+				Debug_MM_true(_tenure == _env->getExtensions()->isOld((omrobjectptr_t)_whitelist[i]));
+				Debug_MM_true(!_whitelist[i]->isReused());
+				Debug_MM_true(!_whitelist[i]->isDiscarded());
+				Debug_MM_true((0 == i) || le(i, parent(i)));
+				volume += _whitelist[i]->length();
+			}
+			uintptr_t end = _count >> 1;
+			for (uintptr_t j = 0; j < end; j += 1) {
+				Debug_MM_true(le(left(j), j));
+				Debug_MM_true((right(j) >=_count) || le(right(j), j));
+				Debug_MM_true((NULL == _tail) || (_whitelist[j]->length() >= _tail->length()));
+			}
+			Debug_MM_true(volume == _volume);
+		}
+	}
+#endif /* defined(EVACUATOR_DEBUG) */
+
 	/**
 	 * Constructor
 	 */
@@ -471,6 +532,7 @@ public:
 		, _flushed(0)
 		, _env(NULL)
 		, _subspace(NULL)
+		, _memoryPool(NULL)
 		, _stats(NULL)
 		, _index(0)
 		, _tenure(false)

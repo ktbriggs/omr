@@ -36,13 +36,15 @@ public:
 
 	/* (rarely) if the epoch counter overflows epoch history record capacity the last history record is reused */
 	typedef struct Epoch {
-		uintptr_t gc;						/* sequential gc cycle number */
-		uintptr_t epoch;					/* sequential epoch number */
-		uint64_t duration;					/* epoch duration in microseconds */
-		uint64_t copied;					/* cumulative copied byte count */
-		uint64_t scanned;					/* cumulative scanned byte count */
-		uintptr_t tlhAllocationCeiling;		/* upper limit on TLH allocation size for next epoch */
-		uintptr_t releaseThreshold;			/* effective work release threshold for next epoch */
+		uintptr_t gc;							/* sequential gc cycle number */
+		uintptr_t epoch;						/* sequential epoch number */
+		uint64_t duration;						/* epoch duration in microseconds */
+		uint64_t survivorCopied;				/* cumulative survivor copied byte count */
+		uint64_t tenureCopied;					/* cumulative tenure copied byte count */
+		uint64_t scanned;						/* cumulative scanned byte count */
+		uintptr_t stalled;						/* instantaneous sample of stalled evacuator count */
+		uintptr_t survivorAllocationCeiling;	/* upper limit on TLH allocation size for survivor */
+		uintptr_t tenureAllocationCeiling;		/* upper limit on TLH allocation size for tenure */
 	} Epoch;
 
 protected:
@@ -66,7 +68,8 @@ public:
 	uintptr_t count() { return _epoch; }
 
 	/* get a past (committed) epoch */
-	Epoch *epoch(uintptr_t epoch)
+	Epoch *
+	epoch(uintptr_t epoch)
 	{
 		Debug_MM_true((epoch < _epoch) || (0 == epoch));
 		return &_history[epochToIndex(epoch)];
@@ -75,40 +78,33 @@ public:
 	/* get the most recently committed epoch */
 	Epoch *epoch() { return epoch((0 < _epoch) ? (_epoch - 1) : 0); }
 
-	/* reserve tail of historic record to receive stats for closiing epoch */
+	/* reserve tail of historic record to receive stats for closing epoch */
 	Epoch *
-	add(uintptr_t gc, uint64_t duration, uint64_t copied, uint64_t scanned)
+	add()
 	{
-		uintptr_t epoch = epochToIndex();
-		_history[epoch].epoch = _epoch;
-		_history[epoch].gc = gc;
-		_history[epoch].duration = duration;
-		_history[epoch].copied = copied;
-		_history[epoch].scanned = scanned;
-		return &_history[epoch];
+		uintptr_t next = VM_AtomicSupport::add(&_epoch, 1) - 1;
+		Epoch *epoch = &_history[epochToIndex(next)];
+		epoch->epoch = next;
+		return epoch;
 	}
-
-	/* get the predecessor of the epoch that is being prepared for commit */
-	Epoch *last() { return &_history[((0 < _epoch) && (reports_per_cycle > _epoch)) ? (_epoch - 1) : epochToIndex()]; }
-
-	/* commit closing epoch and open a new one */
-	void commit(Epoch *epoch) { Debug_MM_true(epoch == &_history[epochToIndex()]); VM_AtomicSupport::add(&_epoch, 1); }
 
 	/* clear history for starting a gc cycle */
 	void
-	reset(uintptr_t gc = 0, uintptr_t tlhAllocationCeiling = 0, uintptr_t releaseThreshold = 0)
+	reset(uintptr_t gc = 0, uintptr_t survivorAllocationCeiling = 0, uintptr_t tenureAllocationCeiling = 0)
 	{
 		for (uintptr_t i = 0; i < reports_per_cycle; i += 1) {
 			_history[i].gc = 0;
 			_history[i].epoch = 0;
 			_history[i].duration = 0;
-			_history[i].copied = 0;
+			_history[i].survivorCopied = 0;
+			_history[i].tenureCopied = 0;
 			_history[i].scanned = 0;
-			_history[i].tlhAllocationCeiling = 0;
-			_history[i].releaseThreshold = 0;
+			_history[i].stalled = 0;
+			_history[i].survivorAllocationCeiling = 0;
+			_history[i].tenureAllocationCeiling = 0;
 		}
-		_history[0].tlhAllocationCeiling = tlhAllocationCeiling;
-		_history[0].releaseThreshold = releaseThreshold;
+		_history[0].survivorAllocationCeiling = survivorAllocationCeiling;
+		_history[0].tenureAllocationCeiling = tenureAllocationCeiling;
 		_history[0].gc = gc;
 		_epoch = 0;
 	}
@@ -118,6 +114,5 @@ public:
 		reset();
 	}
 };
-
 
 #endif /* EVACUATORHISTORY_HPP_ */

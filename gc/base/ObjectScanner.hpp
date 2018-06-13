@@ -64,7 +64,7 @@ protected:
 	uintptr_t _flags;						/**< Scavenger context flags (scanRoots, scanHeap, ...) */
 	uintptr_t _hotFieldsDescriptor;			/**< Hot fields descriptor for languages that support hot field tracking */
 	omrobjectptr_t const _parentObjectPtr;	/**< Object being scanned */
-	
+
 public:
 	/**
 	 *  Instantiation flags used to specialize scanner for specific scavenger operations
@@ -111,7 +111,7 @@ protected:
 	{
 		_typeId = __FUNCTION__;
 	}
-	
+
 	/**
 	 * Set up the scanner. Subclasses should provide a non-virtual implementation
 	 * to build next slot map and call it from their constructor or just after
@@ -177,10 +177,10 @@ public:
 	MMINLINE uintptr_t getHotFieldsDescriptor() { return _hotFieldsDescriptor; }
 
 	/**
-	 * Return base pointer and slot bit map for next block of contiguous slots to be scanned. The
-	 * base pointer must be fomrobject_t-aligned. Bits in the bit map are scanned in order of
+	 * Return scan pointer and slot bit map for next block of contiguous slots to be scanned. The
+	 * scan pointer must be fomrobject_t-aligned. Bits in the bit map are scanned in order of
 	 * increasing significance, and the least significant bit maps to the slot at the returned
-	 * base pointer.
+	 * scan pointer.
 	 *
 	 * @param[out] scanMap the bit map for the slots contiguous with the returned base pointer
 	 * @param[out] hasNextSlotMap set this to true if this method should be called again, false if this map is known to be last
@@ -224,6 +224,14 @@ public:
 
 		return NULL;
 	}
+
+	/**
+	 * Get the most recently scanned object slot. The slot object contents are undefined until after
+	 * the first call to getNextSlot(). NULL is returned after all slots have been scanned. 
+	 *
+	 * @return a pointer to a slot object encapsulating the most recently scanned object slot, or NULL
+	 */
+	MMINLINE GC_SlotObject *getLastSlot() { return isEmpty() ? NULL : &_slotObject; }
 
 	/**
 	 * The object scanner leaf optimization option is enabled by the OMR_GC_LEAF_BITS
