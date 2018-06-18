@@ -71,9 +71,6 @@
 #error "Scan cache default sizes must satisfy DEFAULT_SCAN_CACHE_MINIMUM_SIZE <= (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3)"
 #endif /* (DEFAULT_SCAN_CACHE_MINIMUM_SIZE > (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3)) */
 
-/* this value is used as lower bound for peak copy production rate (copied/scanned) -- lower values are used to scale allocation and work release sizes */
-#define EVACUATOR_LIMIT_PRODUCTION_RATE 1.125 /* C++ does not allow static const declarations for non-integer types */
-
 class MM_EvacuatorBase
 {
 /**
@@ -94,13 +91,25 @@ public:
 	/* lower bound for work queue volume -- lower values trigger clipping of whitespace tlh allocation sizes */
 	static const uintptr_t low_work_volume = MINIMUM_TLH_SIZE;
 
-	/* bounds for TLH allocation size */
+	/* hard bounds for TLH allocation size */
 	static const uintptr_t min_tlh_allocation_size = DEFAULT_SCAN_CACHE_MINIMUM_SIZE;
 	static const uintptr_t max_tlh_allocation_size = DEFAULT_SCAN_CACHE_MAXIMUM_SIZE;
+	static const uintptr_t tlh_allocation_granularity = 4096;
 
-	/* Largest amount of whitespace that can be discarded from the scan stack and outside copyspaces */
+	/* hard bounds for work packet size */
+	static const uintptr_t min_work_packet_size = min_tlh_allocation_size << 1;
+	static const uintptr_t max_work_packet_size = max_tlh_allocation_size >> 1;
+
+	/* largest amount of whitespace that can be discarded from the scan stack and outside copyspaces */
 	static const uintptr_t max_scanspace_remainder = 32;
 	static const uintptr_t max_copyspace_remainder = MINIMUM_TLH_SIZE;
+
+	/* maximum number of array element slots to include in each split array segment */
+	static const uintptr_t max_split_segment_elements = DEFAULT_ARRAY_SPLIT_MINIMUM_SIZE;
+	/* maximum size in bytes of array slots in each split array segment */
+	static const uintptr_t max_split_segment_size = max_split_segment_elements * sizeof(fomrobject_t);
+	/* minimum size in bytes of a splitable indexable object */
+	static const uintptr_t min_split_indexable_size = 2 * max_split_segment_size;
 
 	/* Actual maximal size of scan stack -- operational limit may be lowered to increase outside copying */
 	static const uintptr_t max_scan_stack_depth = 32;
@@ -116,11 +125,6 @@ public:
 
 	/* number of elements in whitelist backing array must be (2^N)-1 for some N */
 	static const uintptr_t max_whitelist = 15;
-
-	/* maximum number of array element slots to include in each split array segment */
-	static const uintptr_t max_split_segment_elements = DEFAULT_ARRAY_SPLIT_MINIMUM_SIZE;
-	/* minimum size in bytes of a splitable indexable object */
-	static const uintptr_t min_split_indexable_size = 2 * max_split_segment_elements * sizeof(fomrobject_t);
 
 	enum { always, until, at, from };
 
