@@ -26,7 +26,6 @@
 #define OMR_SCAVENGER_TRACE_REMEMBERED_SET
 #define OMR_SCAVENGER_TRACE_BACKOUT
 #define OMR_SCAVENGER_TRACE_COPY
-#define OMR_SCAVENGER_TRACK_COPY_DISTANCE
 #endif
 
 #include <math.h>
@@ -1273,11 +1272,11 @@ MM_Scavenger::copyAndForward(MM_EnvironmentStandard *env, GC_SlotObject *slotObj
 	{
 		slotObject->writeReferenceToSlot(slot);
 	}
-#if defined(OMR_SCAVENGER_TRACK_COPY_DISTANCE)
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 	if (NULL != env->_effectiveCopyScanCache) {
 		env->_scavengerStats.countCopyDistance((uintptr_t)slotObject->readAddressFromSlot(), (uintptr_t)slotObject->readReferenceFromSlot());
 	}
-#endif /* OMR_SCAVENGER_TRACK_COPY_DISTANCE */
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 	return result;
 }
 
@@ -1537,7 +1536,9 @@ MM_Scavenger::copy(MM_EnvironmentStandard *env, MM_ForwardedHeader* forwardedHea
 
 		/* Update the stats */
 		MM_ScavengerStats *scavStats = &env->_scavengerStats;
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 		scavStats->countObjectSize(objectReserveSizeInBytes);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 		if(copyCache->flags & OMR_SCAVENGER_CACHE_TYPE_TENURESPACE) {
 			scavStats->_tenureAggregateCount += 1;
 			scavStats->_tenureAggregateBytes += objectCopySizeInBytes;
@@ -3820,7 +3821,7 @@ MM_Scavenger::masterThreadGarbageCollect(MM_EnvironmentBase *envBase, MM_Allocat
 				omrtime_hires_delta(0, stats->_syncStallTime, OMRPORT_TIME_DELTA_IN_MICROSECONDS),
 				omrtime_hires_delta(0, stats->_completeStallTime, OMRPORT_TIME_DELTA_IN_MICROSECONDS),
 				scavengeMicros);
-			uint64_t scavengeBytes = stats->_flipBytes + stats->_tenureAggregateBytes;
+			uintptr_t scavengeBytes = stats->_flipBytes + stats->_tenureAggregateBytes;
 			if (!_extensions->isEvacuatorEnabled()) {
 				omrtty_printf("%5llu      :%10s; %llx 0 0 %llx\n", stats->_gcCount, scavengeCompletedSuccessfully(env) ? "end cycle" : "backout",
 						scavengeBytes, stats->_flipDiscardBytes + stats->_tenureDiscardBytes);

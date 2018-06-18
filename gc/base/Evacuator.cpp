@@ -145,7 +145,7 @@ MM_Evacuator::bindWorkerThread(MM_EnvironmentStandard *env)
 	/* signal controller that this evacuator is ready to start work -- the controller will bind the evacuator to the gc cycle */
 	_controller->startWorker(this, &_tenureMask, _heapBounds, &_copiedBytesReportingDelta);
 
-	_workReleaseThreshold = _controller->calculateWorkReleaseThreshold(getVolumeOfWork(), true);
+	_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(true);
 
 	Debug_MM_true(0 == *(_workList.volume()));
 
@@ -218,7 +218,7 @@ MM_Evacuator::evacuateRootObject(MM_ForwardedHeader *forwardedHeader)
 				/* update evacuator progress for epoch reporting */
 				if ((_copiedBytesDelta[survivor] + _copiedBytesDelta[tenure]) >= _copiedBytesReportingDelta) {
 					_controller->reportProgress(this, _copiedBytesDelta, &_scannedBytesDelta);
-					_workReleaseThreshold = _controller->calculateWorkReleaseThreshold(getVolumeOfWork(), true);
+					_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(true);
 				}
 
 			} else {
@@ -388,6 +388,7 @@ MM_Evacuator::workThreadGarbageCollect(MM_EnvironmentStandard *env)
 		_copyspace[space].setCopyspace(NULL, NULL, 0);
 		_whiteList[space].add(whitespace);
 	}
+
 	/* reset large copyspace (it is void of work and whitespace at this point) */
 	Debug_MM_true(0 == _largeCopyspace.getWorkSize());
 	Debug_MM_true(0 == _largeCopyspace.getWhiteSize());
@@ -443,8 +444,10 @@ MM_Evacuator::scanRoots()
 #if defined(EVACUATOR_DEBUG)
 	if (_controller->_debugger.isDebugCycle()) {
 		OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
-		omrtty_printf("%5lu %2llu %2llu:     roots; stalled:%llx; resuming:%llx; flags:%llx; vow:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch,
-				_workerIndex, _controller->sampleStalledMap(), _controller->sampleResumingMap(), _controller->sampleEvacuatorFlags(), getVolumeOfWork());
+		omrtty_printf("%5lu %2llu %2llu:     roots; ", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex);
+		_controller->printEvacuatorBitmap(_env, "stalled", _controller->sampleStalledMap());
+		_controller->printEvacuatorBitmap(_env, "; resuming", _controller->sampleResumingMap());
+		omrtty_printf("; flags:%llx; vow:%llx\n", _controller->sampleEvacuatorFlags(), getVolumeOfWork());
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 
@@ -457,8 +460,10 @@ MM_Evacuator::scanRemembered()
 #if defined(EVACUATOR_DEBUG)
 	if (_controller->_debugger.isDebugCycle()) {
 		OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
-		omrtty_printf("%5lu %2llu %2llu:remembered; stalled:%llx; resuming:%llx; flags:%llx; vow:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch,
-				_workerIndex, _controller->sampleStalledMap(), _controller->sampleResumingMap(), _controller->sampleEvacuatorFlags(), getVolumeOfWork());
+		omrtty_printf("%5lu %2llu %2llu:remembered; ", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex);
+		_controller->printEvacuatorBitmap(_env, "stalled", _controller->sampleStalledMap());
+		_controller->printEvacuatorBitmap(_env, "; resuming", _controller->sampleResumingMap());
+		omrtty_printf("; flags:%llx; vow:%llx\n", _controller->sampleEvacuatorFlags(), getVolumeOfWork());
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 
@@ -473,8 +478,10 @@ MM_Evacuator::scanClearable()
 #if defined(EVACUATOR_DEBUG)
 	if (_controller->_debugger.isDebugCycle()) {
 		OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
-		omrtty_printf("%5lu %2llu %2llu: clearable; stalled:%llx; resuming:%llx; flags:%llx; vow:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch,
-				_workerIndex, _controller->sampleStalledMap(), _controller->sampleResumingMap(), _controller->sampleEvacuatorFlags(), getVolumeOfWork());
+		omrtty_printf("%5lu %2llu %2llu: clearable; ", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex);
+		_controller->printEvacuatorBitmap(_env, "stalled", _controller->sampleStalledMap());
+		_controller->printEvacuatorBitmap(_env, "; resuming", _controller->sampleResumingMap());
+		omrtty_printf("; flags:%llx; vow:%llx\n", _controller->sampleEvacuatorFlags(), getVolumeOfWork());
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 	/* if there are more root or other unreachable objects to be evacuated they can be copied and forwarded here */
@@ -490,8 +497,10 @@ MM_Evacuator::scanHeap()
 #if defined(EVACUATOR_DEBUG)
 	if (_controller->_debugger.isDebugCycle()) {
 		OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
-		omrtty_printf("%5lu %2llu %2llu:      heap; stalled:%llx; resuming:%llx; flags:%llx; vow:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch,
-				_workerIndex, _controller->sampleStalledMap(), _controller->sampleResumingMap(), _controller->sampleEvacuatorFlags(), getVolumeOfWork());
+		omrtty_printf("%5lu %2llu %2llu:      heap; ", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex);
+		_controller->printEvacuatorBitmap(_env, "stalled", _controller->sampleStalledMap());
+		_controller->printEvacuatorBitmap(_env, "; resuming", _controller->sampleResumingMap());
+		omrtty_printf("; flags:%llx; vow:%llx\n", _controller->sampleEvacuatorFlags(), getVolumeOfWork());
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 
@@ -502,10 +511,8 @@ MM_Evacuator::scanHeap()
 	MM_EvacuatorWorkPacket *work = loadWork();
 
 	while (NULL != work) {
-		Debug_MM_true(NULL == _scanStackFrame);
-
 		/* push found work to prime the stack */
-		_scanStackFrame = push(work);
+		push(work);
 		debugStack(" load");
 
 		/* burn stack down until empty or gc cycle is aborted */
@@ -518,17 +525,17 @@ MM_Evacuator::scanHeap()
 				/* referents that can't be copied inside current frame are pushed up the stack or flushed to outside copyspace */
 				if (reserveInsideCopyspace(slotObjectSizeAfterCopy)) {
 					/* push slot object up to next stack frame */
-					_scanStackFrame = push(slotObject, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy);
+					push(slotObject, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy);
 					debugStack(" push");
 				} else {
 					/* no stack whitespace so flush current stack frame to outside copyspace and pop */
 					debugStack("flush", true);
-					_scanStackFrame = flush(slotObject);
+					flush(slotObject);
 					debugStack("pop");
 				}
 			} else {
 				/* current stack frame has been completely scanned so pop */
-				_scanStackFrame = pop();
+				pop();
 				debugStack("pop");
 			}
 		}
@@ -537,7 +544,9 @@ MM_Evacuator::scanHeap()
 		work = loadWork();
 	}
 
+	/* drive stack to empty without scanning frames if aborting */
 	if (isAbortedCycle()) {
+		/* this leaves remaining whitespace bound to _peakStackFrame */
 		while (_scanStackFrame >= _stackBottom) {
 			pop();
 		}
@@ -607,7 +616,7 @@ MM_Evacuator::nextObjectScanner(MM_EvacuatorScanspace *scanspace, uintptr_t scan
 	/* update evacuator progress for epoch reporting */
 	if ((_scannedBytesDelta >= _copiedBytesReportingDelta) || ((_copiedBytesDelta[survivor] + _copiedBytesDelta[tenure]) >= _copiedBytesReportingDelta)) {
 		_controller->reportProgress(this, _copiedBytesDelta, &_scannedBytesDelta);
-		_workReleaseThreshold = _controller->calculateWorkReleaseThreshold(getVolumeOfWork(), false);
+		_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(false);
 	}
 
 	scanspace->setObjectScanner(objectScanner);
@@ -615,7 +624,7 @@ MM_Evacuator::nextObjectScanner(MM_EvacuatorScanspace *scanspace, uintptr_t scan
 	return objectScanner;
 }
 
-MM_EvacuatorScanspace *
+void
 MM_Evacuator::push(MM_EvacuatorWorkPacket *work)
 {
 	Debug_MM_true(NULL == _peakStackFrame);
@@ -641,12 +650,21 @@ MM_Evacuator::push(MM_EvacuatorWorkPacket *work)
 		_splitArrayBytesToScan = 0;
 	}
 
-	_freeList.add(work);
+#if defined(EVACUATOR_DEBUG)
+	if (_controller->_debugger.isDebugWork()) {
+		OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
+		omrtty_printf("%5lu %2llu %2llu: push work; base:%llx; length:%llx; vow:%llx; ", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex,
+				(uintptr_t)work->base, work->length, getVolumeOfWork());
+		_controller->printEvacuatorBitmap(_env, "stalled", _controller->sampleStalledMap());
+		_controller->printEvacuatorBitmap(_env, "; resuming", _controller->sampleResumingMap());
+		omrtty_printf("\n");
+	}
+#endif /* defined(EVACUATOR_DEBUG) */
 
-	return _scanStackFrame;
+	_freeList.add(work);
 }
 
-MM_EvacuatorScanspace *
+void
 MM_Evacuator::push(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy)
 {
 	/* copy and forward slot object inside peak frame -- this cannot change remembered state of parent so ignore returned pointer */
@@ -659,10 +677,9 @@ MM_Evacuator::push(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy
 	}
 
 	Debug_MM_true(_scanStackFrame < _stackLimit);
-	return _scanStackFrame;
 }
 
-MM_EvacuatorScanspace *
+void
 MM_Evacuator::pop()
 {
 	/* pop the stack */
@@ -696,11 +713,9 @@ MM_Evacuator::pop()
 		_peakStackFrame = NULL;
 		_stackLimit = _stackCeiling;
 	}
-
-	return _scanStackFrame;
 }
 
-MM_EvacuatorScanspace *
+void
 MM_Evacuator::flush(GC_SlotObject *slotObject)
 {
 	GC_ObjectScanner *objectScanner = nextObjectScanner(_scanStackFrame);
@@ -758,7 +773,7 @@ MM_Evacuator::flush(GC_SlotObject *slotObject)
 	} while (NULL != objectScanner);
 
 	/* pop scan stack */
-	return pop();
+	pop();
 }
 
 void
@@ -767,12 +782,12 @@ MM_Evacuator::setStackLimit()
 	/* limit stack to adjacent upper stack frame if there are any stalled evacuators */
 	if (_controller->areAnyEvacuatorsStalled()) {
 		/* reduce work release threshold to enable release of small work packets */
-		_workReleaseThreshold = _controller->calculateWorkReleaseThreshold(getVolumeOfWork(), false);
+		_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(false);
 		/* all evacuator work queues are dry so start flushing frames to outside copyspaces (or continue, if stack frame is up to ceiling) */
 		if (_stackCeiling > _scanStackFrame) {
 			_stackLimit = _scanStackFrame + 1;
 		}
-	} else {
+	} else if (_stackLimit != _stackCeiling){
 		/* blue sky and green fields */
 		_stackLimit = _stackCeiling;
 	}
@@ -865,7 +880,9 @@ MM_Evacuator::reserveInsideCopyspace(uintptr_t slotObjectSizeAfterCopy)
 {
 	MM_EvacuatorScanspace *nextStackFrame = _scanStackFrame + 1;
 	if (nextStackFrame < _stackLimit) {
-		Debug_MM_true((nextStackFrame->getBase() <= nextStackFrame->getScanHead()) && (nextStackFrame->getScanHead() <= nextStackFrame->getCopyHead()) && (nextStackFrame->getCopyHead() < (nextStackFrame->getCopyLimit() + MM_EvacuatorBase::max_inside_object_size)) && (nextStackFrame->getCopyLimit() <= nextStackFrame->getEnd()));
+		Debug_MM_true(nextStackFrame->getBase() <= nextStackFrame->getScanHead());
+		Debug_MM_true(nextStackFrame->getScanHead() <= nextStackFrame->getCopyHead());
+		Debug_MM_true(nextStackFrame->getCopyLimit() <= nextStackFrame->getEnd());
 		uintptr_t nextStackFrameRemainder = nextStackFrame->getLimitedSize();
 		if (slotObjectSizeAfterCopy > nextStackFrameRemainder) {
 
@@ -886,7 +903,7 @@ MM_Evacuator::reserveInsideCopyspace(uintptr_t slotObjectSizeAfterCopy)
 				whitespace = _whiteList[_scanStackRegion].top(slotObjectSizeAfterCopy);
 				if (NULL == whitespace) {
 					/* get a new chunk of whitespace from stack region to burn down */
-					whitespace = _controller->getInsideFreespace(this, _scanStackRegion, nextStackFrameRemainder, slotObjectSizeAfterCopy);
+					whitespace = _controller->getInsideFreespace(this, _scanStackRegion, slotObjectSizeAfterCopy);
 					if (NULL == whitespace) {
 						/* force outside copy */
 #if defined(EVACUATOR_DEBUG)
@@ -928,17 +945,21 @@ MM_Evacuator::copyOutside(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBef
 				MM_EvacuatorWorkPacket *work = _freeList.next();
 				if (isSplitable) {
 					/* record 1-based array offsets to mark split array work packets */
-					uintptr_t offset = 1, remainder = 0;
-					_delegate.getIndexableDataBounds(copyHead, &remainder);
-					while (0 < remainder) {
+					uintptr_t elements = 0;
+					_delegate.getIndexableDataBounds(copyHead, &elements);
+					uintptr_t segments = (elements / MM_EvacuatorBase::max_split_segment_elements) + ((0 != (elements % MM_EvacuatorBase::max_split_segment_elements)) ? 1 : 0);
+					uintptr_t elementsPerSegment = elements / segments;
+					uintptr_t elementsThisSegment = elementsPerSegment + (elements % segments);
+					uintptr_t offset = 1;
+					while (0 < segments) {
 						MM_EvacuatorWorkPacket *work = _freeList.next();
-						uintptr_t chunk = OMR_MIN(MM_EvacuatorBase::max_split_segment_elements, remainder);
 						work->base = copyHead;
 						work->offset = offset;
-						work->length = chunk;
-						remainder -= chunk;
-						offset += chunk;
+						work->length = elementsThisSegment;
 						addWork(work);
+						offset += elementsThisSegment;
+						elementsThisSegment = elementsPerSegment;
+						segments -= 1;
 					}
 				} else {
 					/* set up work packet contained a single large scalar or non-splitable array object */
@@ -948,7 +969,7 @@ MM_Evacuator::copyOutside(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBef
 				}
 				/* prepare the large object copyspace for next use */
 				_largeCopyspace.setCopyspace(NULL, NULL, 0);
-			} else if (worksize >= _workReleaseThreshold) {
+			} else if ((effectiveCopyspace != _scanStackFrame) && (worksize >= _workReleaseThreshold)) {
 				/* strip work from head of effective copyspace into a work packet, leaving only trailing whitespace in copyspace */
 				MM_EvacuatorWorkPacket *work = _freeList.next();
 				work->base = (omrobjectptr_t)effectiveCopyspace->rebase(&work->length);
@@ -976,39 +997,46 @@ MM_Evacuator::reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, uintpt
 
 	if (!useLargeCopyspace) {
 		/* use an outside copyspace if possible -- use large object space only if object will not fit in copyspace remainder whitespace */
-		copyspace = &_copyspace[*evacuationRegion];
+		copyspace = &_copyspace[preferredRegion];
 		uintptr_t copyspaceRemainder = copyspace->getWhiteSize();
 		if (slotObjectSizeAfterCopy > copyspaceRemainder) {
 			copyspace = NULL;
 			/* try the preferred region whitelist first -- but only if it is presenting a large chunk on top */
-			if ((slotObjectSizeAfterCopy <= _whiteList[*evacuationRegion].top()) && (_whiteList[*evacuationRegion].top() >= MM_EvacuatorBase::max_copyspace_remainder)) {
-				whitespace = _whiteList[*evacuationRegion].top(slotObjectSizeAfterCopy);
+			if ((slotObjectSizeAfterCopy <= _whiteList[preferredRegion].top()) && (_whiteList[preferredRegion].top() >= MM_EvacuatorBase::max_copyspace_remainder)) {
+				whitespace = _whiteList[preferredRegion].top(slotObjectSizeAfterCopy);
 			} else {
-				/* try to allocate from preferred region */
-				whitespace = _controller->getOutsideFreespace(this, *evacuationRegion, copyspaceRemainder, slotObjectSizeAfterCopy);
-				if (NULL == whitespace) {
-					/* try other (survivor/tenure) region */
-					*evacuationRegion = otherOutsideRegion(*evacuationRegion);
-					copyspaceRemainder = _copyspace[*evacuationRegion].getWhiteSize();
-					if (slotObjectSizeAfterCopy > copyspaceRemainder) {
-						/* try to allocate from other region whitelist -- but only if it is presenting a large chunk on top */
-						if ((slotObjectSizeAfterCopy <= _whiteList[*evacuationRegion].top()) && (_whiteList[*evacuationRegion].top() >= MM_EvacuatorBase::max_copyspace_remainder)) {
-							whitespace = _whiteList[*evacuationRegion].top(slotObjectSizeAfterCopy);
-						}
-						if (NULL == whitespace) {
-							/* try to allocate from other region */
-							whitespace = _controller->getOutsideFreespace(this, *evacuationRegion, copyspaceRemainder, slotObjectSizeAfterCopy);
+				/* if object size < split array segment size it can be written into the stack if currently scanning frame in preferred region */
+				if ((copyspaceRemainder >= MM_EvacuatorBase::max_copyspace_remainder) && (NULL != _scanStackFrame) && (_scanStackRegion == preferredRegion) &&
+						(MM_EvacuatorBase::max_split_segment_size >= slotObjectSizeAfterCopy) && (slotObjectSizeAfterCopy <= _scanStackFrame->getWhiteSize())) {
+					/* this defers reallocation for outside copyspace while it waits to fill and reduce tail fragment below MM_EvacuatorBase::max_copyspace_remainder */
+					copyspace = _scanStackFrame;
+				} else {
+					/* try to allocate whitespace from the preferred region */
+					whitespace = _controller->getOutsideFreespace(this, preferredRegion, copyspaceRemainder, slotObjectSizeAfterCopy);
+					if (NULL == whitespace) {
+						/* try the other evacuation region (survivor/tenure) */
+						*evacuationRegion = otherOutsideRegion(*evacuationRegion);
+						copyspaceRemainder = _copyspace[*evacuationRegion].getWhiteSize();
+						if (slotObjectSizeAfterCopy > copyspaceRemainder) {
+							/* try to allocate from other region whitelist -- but only if it is presenting a large chunk on top */
+							if ((slotObjectSizeAfterCopy <= _whiteList[*evacuationRegion].top()) && (_whiteList[*evacuationRegion].top() >= MM_EvacuatorBase::max_copyspace_remainder)) {
+								whitespace = _whiteList[*evacuationRegion].top(slotObjectSizeAfterCopy);
+							}
 							if (NULL == whitespace) {
-								/* last chance -- outside regions and whitelists exhausted, try to steal the stack's whitespace */
-								MM_EvacuatorScanspace *whiteStackFrame = (NULL != _peakStackFrame) ? _peakStackFrame : _scanStackFrame;
-								if ((NULL != whiteStackFrame) && (slotObjectSizeAfterCopy <= whiteStackFrame->getWhiteSize())) {
-									whitespace = whiteStackFrame->clip();
-									*evacuationRegion = _scanStackRegion;
+								/* try to allocate from other region */
+								whitespace = _controller->getOutsideFreespace(this, *evacuationRegion, copyspaceRemainder, slotObjectSizeAfterCopy);
+								if (NULL == whitespace) {
+									/* last chance -- outside regions and whitelists exhausted, try to steal the stack's whitespace */
+									MM_EvacuatorScanspace *whiteStackFrame = (NULL != _peakStackFrame) ? _peakStackFrame : _scanStackFrame;
+									if ((NULL != whiteStackFrame) && (slotObjectSizeAfterCopy <= whiteStackFrame->getWhiteSize())) {
+										whitespace = whiteStackFrame->clip();
+										*evacuationRegion = _scanStackRegion;
+									}
 								}
 							}
+						} else {
+							copyspace = &_copyspace[*evacuationRegion];
 						}
-					} else {
-						copyspace = &_copyspace[*evacuationRegion];
 					}
 				}
 			}
@@ -1089,9 +1117,11 @@ MM_Evacuator::copyForward(MM_ForwardedHeader *forwardedHeader, fomrobject_t *ref
 		/* forwarding address set by this thread -- object will be evacuated to the copy head in copyspace */
 		memcpy(forwardedAddress, forwardedHeader->getObject(), originalLength);
 
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 		/* update proximity and size metrics */
 		_stats->countCopyDistance((uintptr_t)referringSlotAddress, (uintptr_t)forwardedAddress);
 		_stats->countObjectSize(forwardedLength);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 
 		/* update scavenger stats */
 		uintptr_t objectAge = _objectModel->getPreservedAge(forwardedHeader);
@@ -1229,7 +1259,7 @@ MM_Evacuator::findWork()
 	MM_EvacuatorWorkPacket *work = NULL;
 
 	if (!isAbortedCycle()) {
-		/* find the evacuator with greatest volume of work */
+		/* select prospective donor as the evacuator with greatest volume of work */
 		MM_Evacuator *max = this;
 		for (MM_Evacuator *evacuator = _controller->getNextEvacuator(max); max != evacuator; evacuator = _controller->getNextEvacuator(evacuator)) {
 			if (_controller->isBoundEvacuator(evacuator->getWorkerIndex()) && (evacuator->getVolumeOfWork() > max->getVolumeOfWork())) {
@@ -1239,7 +1269,7 @@ MM_Evacuator::findWork()
 
 		if (0 < max->getVolumeOfWork()) {
 			MM_Evacuator *donor = max;
-			/* if selected donor is engaged, move on to the next evacuator that can donate work, regardless of its relative volume of work */
+			/* no work obtained from selected donor, poll for the next evacuator that can donate work or bail if poll wraps to max */
 			do {
 				Debug_MM_true(this != donor);
 				/* skipping involved evacuators is ok if every stalled evacuator that enters donor mutex takes work from donor worklist if any is available ... */
@@ -1247,38 +1277,41 @@ MM_Evacuator::findWork()
 					if (0 < donor->getVolumeOfWork()) {
 						/* ... which it does, here */
 						work = donor->_workList.next();
-						if (NULL != work) {
-							/* level this evacuator's volume of work up with donor */
-							uintptr_t volume = work->length;
-							while (volume < donor->getVolumeOfWork()) {
-								MM_EvacuatorWorkPacket *next = donor->_workList.next();
-								if (NULL != next) {
-									/* this evacuator holds the controller mutex and can add to its worklist without owning its mutex here */
-									_workList.add(next, &_freeList);
-									volume += work->length;
-								}
-							}
+						Debug_MM_true(NULL != work);
+
+						/* level this evacuator's volume of work up with donor */
+						uintptr_t volume = work->length;
+						while (volume < donor->getVolumeOfWork()) {
+							/* this evacuator holds the controller mutex so it does not take its own mutex to add work */
+							MM_EvacuatorWorkPacket *next = donor->_workList.next();
+							Debug_MM_true(NULL != next);
+							_workList.add(next, &_freeList);
+							volume += next->length;
 						}
 					}
 					omrthread_monitor_exit(donor->_mutex);
 				}
 
-				if (NULL != work) {
+				if (NULL == work) {
+					/* no work from selected donor so continue donor enumeration, skipping evacuators with no work */
+					do {
+						/* bail with no work if donor wraps around to max */
+						donor = _controller->getNextEvacuator(donor);
+					} while ((donor != max) && (0 == donor->getVolumeOfWork()));
+				} else {
 #if defined(EVACUATOR_DEBUG)
 					if (_controller->_debugger.isDebugWork()) {
 						OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
-						omrtty_printf("%5lu %2llu %2llu:      pull; base:%llx; length:%llx; vow:%llx; donor:%llx; donor-vow:%llx; stalled:%llx; resuming:%llx\n",
-								_controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex, (uintptr_t)work->base, work->length, getVolumeOfWork(),
-								donor->_workerIndex, donor->getVolumeOfWork(), _controller->sampleStalledMap(), _controller->sampleResumingMap());
+						omrtty_printf("%5lu %2llu %2llu: pull work; base:%llx; length:%llx; vow:%llx; donor:%llx; donor-vow:%llx; ", _controller->getEpoch()->gc, _controller->getEpoch()->epoch,
+								_workerIndex, (uintptr_t)work->base, work->length, getVolumeOfWork(),donor->_workerIndex, donor->getVolumeOfWork());
+						_controller->printEvacuatorBitmap(_env, "stalled", _controller->sampleStalledMap());
+						_controller->printEvacuatorBitmap(_env, "; resuming", _controller->sampleResumingMap());
+						omrtty_printf("\n");
 					}
 #endif /* defined(EVACUATOR_DEBUG) */
 					break;
 				}
 
-				/* skip self and other stalled evacuators in donor enumeration and stop with no work if donor wraps around to max */
-				do {
-					donor = _controller->getNextEvacuator(donor);
-				} while ((donor != max) && (!_controller->isBoundEvacuator(donor->getWorkerIndex()) || (0 == donor->getVolumeOfWork())));
 			} while (donor != max);
 		}
 	}
@@ -1297,61 +1330,47 @@ MM_Evacuator::loadWork()
 		omrthread_monitor_enter(_mutex);
 		work = _workList.next();
 		omrthread_monitor_exit(_mutex);
+
+		/* otherwise take work from smallest nonempty outside copyspace and pump the larger one */
+		if (NULL == work) {
+			MM_EvacuatorCopyspace *smallCopyspace = &_copyspace[(_copyspace[survivor].getWorkSize() > _copyspace[tenure].getWorkSize()) ? survivor : tenure];
+			if (0 < smallCopyspace->getWorkSize()) {
+				work = _freeList.next();
+				work->base = (omrobjectptr_t)smallCopyspace->rebase(&work->length);
+			}
+		}
 	}
 
 	if (NULL == work) {
-		/* check for nonempty outside copyspace to provide work in case we can't pull from other evacuators */
-		EvacuationRegion largestOutsideCopyspaceRegion = (_copyspace[survivor].getWorkSize() > _copyspace[tenure].getWorkSize()) ? survivor : tenure;
-		bool hasOutsideWork = (0 < _copyspace[largestOutsideCopyspaceRegion].getWorkSize());
+		/* worklist is empty, or aborting (all aborting evacuators must wait here) */
+		_controller->acquireController();
 
-		/* worklist is empty, or aborting; if nothing in outside copyspaces or no other evacuators are stalled try to pull work from other evacuators */
-		if (!_controller->areAnyEvacuatorsStalled() || !hasOutsideWork || isAbortedCycle()) {
-			_controller->acquireController();
-
-			work = findWork();
-			if ((NULL == work) && (!hasOutsideWork || isAbortedCycle())) {
+		work = findWork();
+		if ((NULL == work) || isAbortedCycle()) {
 #if defined(EVACUATOR_DEBUG) || defined(J9MODRON_TGC_PARALLEL_STATISTICS)
-				uint64_t waitStartTime = startWaitTimer();
+			uint64_t waitStartTime = startWaitTimer();
 #endif /* defined(EVACUATOR_DEBUG) || defined(J9MODRON_TGC_PARALLEL_STATISTICS) */
 
-				flushForWaitState();
-				_controller->reportProgress(this, _copiedBytesDelta, &_scannedBytesDelta);
-				/* controller will release evacuator from stall when work is received or all other evacuators have stalled to complete or abort scan */
-				while (_controller->isWaitingToCompleteStall(this, work)) {
-					/* wait for work or until controller signals all evacuators to complete or abort scan */
-					_controller->waitForWork();
-					work = findWork();
-				}
-				/* continue scanning received work or complete or abort scan */
-				_controller->continueAfterStall(this, work);
+			flushForWaitState();
+			_controller->reportProgress(this, _copiedBytesDelta, &_scannedBytesDelta);
+			/* controller will release evacuator from stall when work is received or all other evacuators have stalled to complete or abort scan */
+			while (_controller->isWaitingToCompleteStall(this, work)) {
+				/* wait for work or until controller signals all evacuators to complete or abort scan */
+				_controller->waitForWork();
+				work = findWork();
+			}
+			/* continue scanning received work or complete or abort scan */
+			_controller->continueAfterStall(this, work);
 
 #if defined(EVACUATOR_DEBUG) || defined(J9MODRON_TGC_PARALLEL_STATISTICS)
-				endWaitTimer(waitStartTime, work);
+			endWaitTimer(waitStartTime, work);
 #endif /* defined(EVACUATOR_DEBUG) || defined(J9MODRON_TGC_PARALLEL_STATISTICS) */
-			}
-			hasOutsideWork &= !isAbortedCycle();
-
-			_controller->releaseController();
 		}
 
-		/* no work except in outside copyspaces is more likely to occur at tail end of heap scan */
-		if ((NULL == work) && hasOutsideWork) {
-			/* there are stalled evacuators so just take largest outside copyspace as work */
-			work = _freeList.next();
-			work->base = (omrobjectptr_t)_copyspace[largestOutsideCopyspaceRegion].rebase(&work->length);
-
-			/* put the other copyspace contents, if any, into a deferred work packet and put it on the worklist */
-			EvacuationRegion smallOutsideCopyspaceRegion = otherOutsideRegion(largestOutsideCopyspaceRegion);
-			if (0 < _copyspace[smallOutsideCopyspaceRegion].getWorkSize()) {
-				/* this small work packet will liklely be pulled by a stalled evacuator */
-				MM_EvacuatorWorkPacket *defer = _freeList.next();
-				defer->base = (omrobjectptr_t)_copyspace[smallOutsideCopyspaceRegion].rebase(&defer->length);
-				addWork(defer);
-			}
-		}
+		_controller->releaseController();
 	}
 
-	_workReleaseThreshold = _controller->calculateWorkReleaseThreshold(getVolumeOfWork(), false);
+	_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(false);
 
 	/* if no work at this point heap scan completes (or aborts) */
 	return work;
@@ -1364,8 +1383,10 @@ MM_Evacuator::startWaitTimer()
 	OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
 #if defined(EVACUATOR_DEBUG)
 	if (_controller->_debugger.isDebugWork()) {
-		omrtty_printf("%5lu %2llu %2llu:     stall; stalled:%llx; resuming:%llx; flags:%llx; vow:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch,
-				_workerIndex, _controller->sampleStalledMap(), _controller->sampleResumingMap(), _controller->sampleEvacuatorFlags(), getVolumeOfWork());
+		omrtty_printf("%5lu %2llu %2llu:     stall; ", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex);
+		_controller->printEvacuatorBitmap(_env, "stalled", _controller->sampleStalledMap());
+		_controller->printEvacuatorBitmap(_env, "; resuming", _controller->sampleResumingMap());
+		omrtty_printf("; flags:%llx; vow:%llx\n", _controller->sampleEvacuatorFlags(), getVolumeOfWork());
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 	return omrtime_hires_clock();
@@ -1382,8 +1403,10 @@ MM_Evacuator::endWaitTimer(uint64_t waitStartTime, MM_EvacuatorWorkPacket *work)
 #if defined(EVACUATOR_DEBUG)
 	if (_controller->_debugger.isDebugWork()) {
 		uint64_t waitMicros = omrtime_hires_delta(waitStartTime, waitEndTime, OMRPORT_TIME_DELTA_IN_MICROSECONDS);
-		omrtty_printf("%5lu %2llu %2llu:    resume; stalled:%llx; resuming:%llx; flags:%llx; vow:%llx; work:0x%llx; length:%llx; micros:%llu\n", _controller->getEpoch()->gc,
-				_controller->getEpoch()->epoch, _workerIndex, _controller->sampleStalledMap(), _controller->sampleResumingMap(), _controller->sampleEvacuatorFlags(),
+		omrtty_printf("%5lu %2llu %2llu:    resume; ", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex);
+		_controller->printEvacuatorBitmap(_env, "stalled", _controller->sampleStalledMap());
+		_controller->printEvacuatorBitmap(_env, "; resuming", _controller->sampleResumingMap());
+		omrtty_printf("; flags:%llx; vow:%llx; work:0x%llx; length:%llx; micros:%llu\n", _controller->sampleEvacuatorFlags(),
 				getVolumeOfWork(), (uintptr_t)work, ((NULL != work) ? work->length : 0), waitMicros);
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
