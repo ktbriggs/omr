@@ -72,17 +72,26 @@ class MM_EvacuatorController : public MM_Collector
  * Data members
  */
 private:
-	static const uintptr_t max_evacuator_tasks = 64;
+	/* constants for mapping evacuator index to bitmap word and bit offset */
+	static const uintptr_t index_to_map_word_shift = 6;
+	static const uintptr_t index_to_map_word_modulus = ((uintptr_t)1 << index_to_map_word_shift) - 1;
+
 	static const uintptr_t epochs_per_cycle = MM_EvacuatorHistory::epochs_per_cycle;
 	static const uintptr_t allocation_page_size = MM_EvacuatorBase::inside_copy_size;
 
+	typedef MM_Evacuator *EvacuatorPointer;
+
+	const uintptr_t _maxGCThreads;						/* fixed for life of vm */
+	EvacuatorPointer * const _evacuatorTask;			/* array of pointers to instantiated evacuators */
+	uintptr_t _evacuatorCount;							/* number of gc threads that will participate in collection */
 	omrthread_monitor_t	_controllerMutex;				/* synchronize evacuator work distribution and end of scan cycle */
 	omrthread_monitor_t	_reporterMutex;					/* synchronize collection of epochal records within gc cycle */
-	volatile uint64_t _boundEvacuatorBitmap;			/* maps evacuator threads that have been dispatched and bound to an evacuator instance */
-	volatile uint64_t _stalledEvacuatorBitmap;			/* maps evacuator threads that are stalled (waiting for work) */
-	volatile uint64_t _resumingEvacuatorBitmap;			/* maps evacuator threads that are resuming or completing scan cycle after stalling */
-	volatile uint64_t _evacuatorMask;					/* maps all evacuator threads, bound or unbound */
-	volatile uintptr_t _evacuatorCount;					/* number of GC threads that have joined the evacuation so far */
+	volatile uint64_t * const _boundEvacuatorBitmap;	/* maps evacuator threads that have been dispatched and bound to an evacuator instance */
+	volatile uint64_t * const _stalledEvacuatorBitmap;	/* maps evacuator threads that are stalled (waiting for work) */
+	volatile uint64_t * const _resumingEvacuatorBitmap;	/* maps evacuator threads that are resuming or completing scan cycle after stalling */
+	volatile uint64_t * const _evacuatorMask;			/* maps all evacuator threads, bound or unbound */
+	volatile uintptr_t _stalledEvacuatorCount;			/* number of stalled evacuator threads */
+	volatile uintptr_t _evacuatorIndex;					/* number of GC threads that have joined the evacuation so far */
 	volatile uintptr_t _evacuatorFlags;					/* private and public (language defined) evacuation flags shared among evauators */
 	volatile uintptr_t _copyspaceAllocationCeiling[2];	/* upper bounds for copyspace allocation in survivor, tenure regions */
 	volatile uintptr_t _objectAllocationCeiling[2];		/* upper bounds for object allocation in survivor, tenure regions */
@@ -92,7 +101,6 @@ private:
 
 	uint8_t *_heapLayout[3][2];							/* generational heap region bounds */
 	MM_MemorySubSpace *_memorySubspace[3];				/* pointers to memory subspaces for heap regions */
-	MM_Evacuator *_evacuatorTask[max_evacuator_tasks];	/* controller's view of evacuators */
 
 	const double _limitProductionRate;
 
@@ -114,7 +122,7 @@ protected:
 	MM_ParallelDispatcher * const _dispatcher;			/* dispatches evacuator tasks */
 	uintptr_t _tenureMask;								/* tenure mask for selecting whether evacuated object should be tenured */
 	MM_MemorySubSpaceSemiSpace *_activeSubSpace; 		/* top level new subspace subject to GC */
-	MM_MemorySubSpace *_evacuateMemorySubSpace; 		/* cached pointer to evacuate subspace within active subspace */
+	MM_MemorySubSpace *_evacuateMemorySubSpace;			/* cached pointer to evacuate subspace within active subspace */
 	MM_MemorySubSpace *_survivorMemorySubSpace; 		/* cached pointer to survivor subspace within active subspace */
 	MM_MemorySubSpace *_tenureMemorySubSpace;			/* cached pointer to tenure subspace */
 	void *_evacuateSpaceBase, *_evacuateSpaceTop;		/* cached base and top heap pointers within evacuate subspace */
@@ -128,8 +136,8 @@ public:
 	static const uintptr_t minimumCopyspaceSize = MM_EvacuatorBase::min_tlh_allocation_size; /* hard lower bound for tlh copyspace allocation size */
 	static const uintptr_t maximumCopyspaceSize = MM_EvacuatorBase::max_tlh_allocation_size; /* hard upper bound for tlh copyspace allocation size */
 
-	static const uintptr_t minimumWorkspaceSize = minimumCopyspaceSize >> 1; /* hard lower bound for work packet size */
-	static const uintptr_t maximumWorkspaceSize = maximumCopyspaceSize >> 1; /* hard upper bound for work packet size */
+	static const uintptr_t minimumWorkspaceSize = MM_EvacuatorBase::min_work_packet_size; /* hard lower bound for work packet size */
+	static const uintptr_t maximumWorkspaceSize = MM_EvacuatorBase::min_work_packet_size; /* hard upper bound for work packet size */
 
 	static const uintptr_t max_evacuator_public_flag = (uintptr_t)1 << 15;
 	static const uintptr_t min_evacuator_private_flag = (uintptr_t)1 << 16;
@@ -150,30 +158,112 @@ public:
  */
 private:
 	/* lower and upper address bounds for each involved heap region */
-	MMINLINE void copyHeapLayout(uint8_t *a[][2], uint8_t *b[][2]);
+	void copyHeapLayout(uint8_t *a[][2], uint8_t *b[][2]);
 
 	/* allocate at least minimumLength, at most optimalLength, bytes of whitespace in specified region */
-	MMINLINE MM_EvacuatorWhitespace * allocateWhitespace(MM_Evacuator *evacuator, MM_Evacuator::EvacuationRegion region, uintptr_t remainder, uintptr_t minimumLength, bool inside);
-
-	/* calculate the ratio of stalled (and not resuming) evacuators vs total evacuator count */
-	MMINLINE double calcluateStalledEvacuatorRatio();
+	MM_EvacuatorWhitespace *allocateWhitespace(MM_Evacuator *evacuator, MM_Evacuator::EvacuationRegion region, uintptr_t remainder, uintptr_t minimumLength, bool inside);
 
 	/* calculate a rough overestimate of the amount of matter that will be evacuated to survivor or tenure in current cycle */
-	MMINLINE uint64_t  calculateProjectedEvacuationBytes();
+	uint64_t  calculateProjectedEvacuationBytes();
 
 	/* calculate whitespace allocation size considering volume of remaining survivor space and current ratio of unscanned/scanned bytes */
-	MMINLINE uintptr_t calculateOptimalWhitespaceSize();
+	uintptr_t calculateOptimalWhitespaceSize();
 
-	/* evacuator bitmask is traversed in increasing index order, index wraps around to 0 at maximal index */
+	/* this is the ratio of running evacuators vs evacuator count */
+	double calcluateEvacuatorBandwidth();
+
+	/* allocate and NULL-fill evacuator pointer array (evacuators instantiated at gc start as required) */
+	static EvacuatorPointer *
+	allocateEvacuatorArray(MM_EnvironmentBase *env, uintptr_t maxGCThreads)
+	{
+		EvacuatorPointer *evacuatorArray = NULL;
+
+		if (env->getExtensions()->isEvacuatorEnabled()) {
+			Debug_MM_true(0 < maxGCThreads);
+			evacuatorArray = (EvacuatorPointer *)env->getForge()->allocate(sizeof(EvacuatorPointer) * maxGCThreads, OMR::GC::AllocationCategory::FIXED, OMR_GET_CALLSITE());
+			Debug_MM_true(NULL != evacuatorArray);
+			for (uintptr_t evacuator = 0; evacuator < maxGCThreads; evacuator += 1) {
+				evacuatorArray[evacuator] = NULL;
+			}
+		}
+
+		return evacuatorArray;
+	}
+
+	/* allocate and 0-fill evacuator thread bitmap */
+	static volatile uint64_t *
+	allocateEvacuatorBitmap(MM_EnvironmentBase *env, uintptr_t maxGCThreads)
+	{
+		volatile uint64_t *map = NULL;
+
+		if (env->getExtensions()->isEvacuatorEnabled()) {
+			Debug_MM_true(0 < maxGCThreads);
+			uintptr_t mapWords = (maxGCThreads >> index_to_map_word_shift) + ((0 != (maxGCThreads & index_to_map_word_modulus)) ? 1 : 0);
+			map = (volatile uint64_t *)env->getForge()->allocate(sizeof(uint64_t) * mapWords, OMR::GC::AllocationCategory::FIXED, OMR_GET_CALLSITE());
+			Debug_MM_true(NULL != map);
+			for (uintptr_t word = 0; word < mapWords; word += 1) {
+				map[word] = 0;
+			}
+		}
+
+		return map;
+	}
+
+	/* evacuator bitmask is traversed in increasing index order, index wraps around to 0 after last bound evacuator */
 	uintptr_t
 	nextWorkerIndex(uintptr_t workerIndex)
 	{
 		workerIndex += 1;
-		if (workerIndex >= _evacuatorCount) {
+		if (workerIndex >= _evacuatorIndex) {
 			workerIndex = 0;
 		}
 		return workerIndex;
 	}
+
+	/* get bit mask for evacuator bit as aligned in evacuator bitmap */
+	uint64_t
+	getEvacuatorBitMask(uintptr_t evacuatorIndex)
+	{
+		Debug_MM_true(evacuatorIndex < _evacuatorCount);
+		return (uint64_t)1 << (evacuatorIndex & index_to_map_word_modulus);
+	}
+
+	/* calculate word/bit coordinates for worker index */
+	uintptr_t
+	mapEvacuatorIndexToMapAndMask(uintptr_t evacuatorIndex, uint64_t *evacuatorBitmask)
+	{
+		Debug_MM_true(evacuatorIndex < _evacuatorCount);
+		*evacuatorBitmask = getEvacuatorBitMask(evacuatorIndex);
+		return evacuatorIndex >> index_to_map_word_shift;
+	}
+
+	/* set evacuator bit in evacuator bitmap */
+	bool
+	testEvacuatorBit(uintptr_t evacuatorIndex, volatile uint64_t *bitmap)
+	{
+		Debug_MM_true(evacuatorIndex < _evacuatorCount);
+		uint64_t evacuatorMask = 0;
+		uintptr_t evacuatorMap = mapEvacuatorIndexToMapAndMask(evacuatorIndex, &evacuatorMask);
+		return (evacuatorMask == (bitmap[evacuatorMap] & evacuatorMask));
+	}
+
+	/* calculate the number of active words in the evacuator bitmaps */
+	MMINLINE uintptr_t countEvacuatorBitmapWords(uintptr_t *tailWords);
+
+	/* test evacuator bitmap for all 0s (reliable only when caller holds controller mutex) */
+	MMINLINE bool isEvacuatorBitmapEmpty(volatile uint64_t *bitmap);
+
+	/* test evacuator bitmap for all 1s (reliable only when caller holds controller mutex) */
+	MMINLINE bool isEvacuatorBitmapFull(volatile uint64_t *bitmap);
+
+	/* fill evacuator bitmap with all 1s (reliable only when caller holds controller mutex) */
+	MMINLINE void fillEvacuatorBitmap(volatile uint64_t * bitmap);
+
+	/* set evacuator bit in evacuator bitmap */
+	MMINLINE uint64_t setEvacuatorBit(uintptr_t evacuatorIndex, volatile uint64_t *bitmap);
+
+	/* clear evacuator bit in evacuator bitmap */
+	MMINLINE void clearEvacuatorBit(uintptr_t evacuatorIndex, volatile uint64_t *bitmap);
 
 	/* test for object alignment */
 	bool isObjectAligned(void *pointer) { return 0 == ((uintptr_t)pointer & (_objectAlignmentInBytes - 1)); }
@@ -245,10 +335,10 @@ public:
 	uintptr_t getEvacuatorThreadCount() { return _evacuatorCount; }
 
 	/* these methods return accurate results only when caller holds the controller or evacuator mutex */
-	bool isBoundEvacuator(uintptr_t evacuatorIndex) { return (0 != (_boundEvacuatorBitmap & ((uint64_t)1 << evacuatorIndex))); }
-	bool isStalledEvacuator(uintptr_t evacuatorIndex) { return (0 != (_boundEvacuatorBitmap & _stalledEvacuatorBitmap & ((uint64_t)1 << evacuatorIndex))); }
-	bool isResumingEvacuator(uintptr_t evacuatorIndex) { return (0 != (_boundEvacuatorBitmap & _stalledEvacuatorBitmap & _resumingEvacuatorBitmap & ((uint64_t)1 << evacuatorIndex))); }
-	bool areAnyEvacuatorsStalled() { return 0 != (_stalledEvacuatorBitmap & ~_resumingEvacuatorBitmap); }
+	bool isBoundEvacuator(uintptr_t evacuatorIndex) { return testEvacuatorBit(evacuatorIndex, _boundEvacuatorBitmap); }
+	bool isStalledEvacuator(uintptr_t evacuatorIndex) { return isBoundEvacuator(evacuatorIndex) && testEvacuatorBit(evacuatorIndex, _stalledEvacuatorBitmap); }
+	bool isResumingEvacuator(uintptr_t evacuatorIndex) { return isStalledEvacuator(evacuatorIndex) && testEvacuatorBit(evacuatorIndex, _resumingEvacuatorBitmap); }
+	bool areAnyEvacuatorsStalled() { return (0 < _stalledEvacuatorCount); }
 
 	/**
 	 * Get the nearest neighboring bound evacuator, or wrap around and return identity if no other evacuators are bound
@@ -330,13 +420,13 @@ public:
 	void reportProgress(MM_Evacuator *worker, uint64_t *copied, uint64_t *scanned);
 
 	/**
-	 * Calculate threshold for releasing work packets from outside copyspaces considering current global work scaling and evacuator's queued volume of work
+	 * Calculate threshold for releasing work packets from outside copyspaces considering current aggregate
+	 * volume of queued work and evacuator thread bandwidth.
 	 *
-	 * @param evacuatorVolumeOfWork the total volume of work (in bytes) enqueued on the calling evacuator's worklist
 	 * @param isRootScan true if the calling evacuator is evacuating root or clearable objects and has an empty scan stack
 	 * @return the minimum number of unscanned bytes to accumulate in outside copyspaces before releasing a work packet
 	 */
-	uintptr_t calculateWorkReleaseThreshold(uint64_t evacuatorVolumeOfWork, bool isRootScan);
+	uintptr_t calculateOptimalWorkPacketSize(bool isRootScan);
 
 	/**
 	 * Evacuator must call this before synchronizing with other evacuator threads through the MM_ParallelTask
@@ -359,11 +449,6 @@ public:
 	 * @param id callsite
 	 */
 	void continueAfterSynchronizing(MM_Evacuator *worker, uint64_t startTime, uint64_t endTime, const char *id);
-
-	/**
-	 *  This is unity unless 0 < global scanned bytes and ratio of global copied to scanned bytes is <2 (see MM_EvacuatorBase::copy_scan_top_rating)
-	 */
-	double calculateGlobalWorkScalingRatio();
 
 	/**
 	 * Evacuator will notify controller of work whenever it adds to its own worklist. Controller will notify
@@ -424,11 +509,10 @@ public:
 	 *
 	 * @param worker the calling evacuator
 	 * @param region the region (surivor or tenure) to obtain free space from
-	 * @param remainder the number of bytes of free space remaining in the worker's copyspace for the region
 	 * @param length the (minimum) number of bytes of free space required
 	 * @return a pointer to space allocated, which may be larger that the requested length
 	 */
-	MM_EvacuatorWhitespace *getInsideFreespace(MM_Evacuator *worker, MM_Evacuator::EvacuationRegion region, uintptr_t remainder, uintptr_t length);
+	MM_EvacuatorWhitespace *getInsideFreespace(MM_Evacuator *worker, MM_Evacuator::EvacuationRegion region, uintptr_t length);
 
 	/**
 	 * Evacuator calls this to get free space for outside (breadth-first) copying in specified destination memory space.
@@ -449,13 +533,17 @@ public:
 	 */
 	MM_EvacuatorController(MM_EnvironmentBase *env)
 		: MM_Collector()
+		, _maxGCThreads(((MM_ParallelDispatcher *)env->getExtensions()->dispatcher)->threadCountMaximum())
+		, _evacuatorTask(allocateEvacuatorArray(env, _maxGCThreads))
+		, _evacuatorCount(0)
 		, _controllerMutex(NULL)
 		, _reporterMutex(NULL)
-		, _boundEvacuatorBitmap(0)
-		, _stalledEvacuatorBitmap(0)
-		, _resumingEvacuatorBitmap(0)
-		, _evacuatorMask(0)
-		, _evacuatorCount(0)
+		, _boundEvacuatorBitmap(allocateEvacuatorBitmap(env, _maxGCThreads))
+		, _stalledEvacuatorBitmap(allocateEvacuatorBitmap(env, _maxGCThreads))
+		, _resumingEvacuatorBitmap(allocateEvacuatorBitmap(env, _maxGCThreads))
+		, _evacuatorMask(allocateEvacuatorBitmap(env, _maxGCThreads))
+		, _stalledEvacuatorCount(0)
+		, _evacuatorIndex(0)
 		, _evacuatorFlags(0)
 		, _nextEpochCopiedBytesThreshold(0)
 		, _copiedBytesReportingDelta(0)
@@ -490,8 +578,9 @@ public:
 
 #if defined(EVACUATOR_DEBUG)
 	uintptr_t sampleEvacuatorFlags() { return _evacuatorFlags; }
-	uint64_t sampleStalledMap() { return _stalledEvacuatorBitmap; }
-	uint64_t sampleResumingMap() { return _resumingEvacuatorBitmap; }
+	volatile uint64_t *sampleStalledMap() { return _stalledEvacuatorBitmap; }
+	volatile uint64_t *sampleResumingMap() { return _resumingEvacuatorBitmap; }
+	void printEvacuatorBitmap(MM_EnvironmentBase *env, const char *label, volatile uint64_t *bitmap);
 #endif /* defined(EVACUATOR_DEBUG) */
 };
 

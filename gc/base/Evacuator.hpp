@@ -108,10 +108,10 @@ private:
 	MMINLINE MM_EvacuatorWorkPacket *loadWork();
 
 	MMINLINE GC_ObjectScanner *nextObjectScanner(MM_EvacuatorScanspace *scanspace, uintptr_t scannedBytes = 0);
-	MMINLINE MM_EvacuatorScanspace *push(MM_EvacuatorWorkPacket *work);
-	MMINLINE MM_EvacuatorScanspace *push(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy);
-	MMINLINE MM_EvacuatorScanspace *pop();
-	MMINLINE MM_EvacuatorScanspace *flush(GC_SlotObject *slotObject);
+	MMINLINE void push(MM_EvacuatorWorkPacket *work);
+	MMINLINE void push(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy);
+	MMINLINE void pop();
+	MMINLINE void flush(GC_SlotObject *slotObject);
 	MMINLINE void setStackLimit();
 
 	MMINLINE bool reserveInsideCopyspace(uintptr_t slotObjectSizeAfterCopy);

@@ -187,6 +187,16 @@ public:
 		_objectScanner = NULL;
 	}
 
+	MMINLINE void
+	pullWhitespace(MM_EvacuatorScanspace *fromspace)
+	{
+		/* pull whitespace at end of fromspace into this scanspace */
+		setScanspace(fromspace->_copy, fromspace->_copy, fromspace->getWhiteSize(), fromspace->isLOA());
+
+		/* trim tail of fromspace and leave base, scan and flags as they are */
+		fromspace->_end = fromspace->_limit = fromspace->_copy;
+	}
+
 	/**
 	 * Load a split array segment into this scanspace.
 	 *
