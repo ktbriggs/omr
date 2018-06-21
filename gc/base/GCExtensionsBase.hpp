@@ -422,6 +422,7 @@ public:
 	bool concurrentScavengerBackgroundThreadsForced; /**< true if concurrentScavengerBackgroundThreads set via command line option */
 	uintptr_t concurrentScavengerSlack; /**< amount of bytes added on top of avearge allocated bytes during concurrent cycle, in calcualtion for survivor size */
 #endif	/* OMR_GC_CONCURRENT_SCAVENGER */
+	uintptr_t evacuatorMaximumInsideCopySize; /**< The size in bytes of the largest object that can be copied inside an evacuator scan stack frame */
 	uintptr_t scavengerFailedTenureThreshold;
 	uintptr_t maxScavengeBeforeGlobal;
 	uintptr_t scvArraySplitMaximumAmount; /**< maximum number of elements to split array scanning work in the scavenger */
@@ -1368,6 +1369,7 @@ public:
 		, concurrentScavengerBackgroundThreadsForced(false)
 		, concurrentScavengerSlack(0)
 #endif /* defined(OMR_GC_CONCURRENT_SCAVENGER) */
+		, evacuatorMaximumInsideCopySize(0) /**< if enabled evacuator controller will override with default or configured valaue */
 		, scavengerFailedTenureThreshold(0)
 		, maxScavengeBeforeGlobal(0)
 		, scvArraySplitMaximumAmount(DEFAULT_ARRAY_SPLIT_MAXIMUM_SIZE)

@@ -231,6 +231,11 @@ private:
 protected:
 public:
 	/**
+	 * Peek at the work packet at the head of the list, or NULL
+	 */
+	MMINLINE MM_EvacuatorWorkPacket *peek() { return _head; }
+
+	/**
 	 * Returns a pointer to the volatile sum of the number of bytes contained in work packets in the list
 	 */
 	MMINLINE volatile uint64_t *volume() { return &_volume; }
@@ -239,6 +244,10 @@ public:
 	 * Add a work packet at the end of the list. If the contained work is contiguous with the work in the
 	 * packet at the tail of the list the contained work will be coalesced into the tail packet and the
 	 * packet will be added to the freelist.
+	 *
+	 * NOTE: the work packet may become merged with the tail packet if contiguous. In that case the work
+	 * packet pointed to by the input parameter will be added to the free list and reset to any empty
+	 * and unused stte. Caller must be aware that this pointer may not point to original packet on return.
 	 *
 	 * @param work the packet to add
 	 * @param freelist the list of free work packets
@@ -249,7 +258,8 @@ public:
 	{
 		Debug_MM_true((0 == _volume) == (NULL == _head));
 		Debug_MM_true((NULL == _head) == (NULL == _tail));
-		Debug_MM_true((NULL != work->base) && (0 < work->length));
+		Debug_MM_true((_head != _tail) || (NULL == _head) || (_head->length == _volume));
+		Debug_MM_true((NULL != work) && (NULL != work->base) && (0 < work->length));
 
 		work->next = NULL;
 		uintptr_t length = work->length;
@@ -267,10 +277,12 @@ public:
 
 		VM_AtomicSupport::addU64(&_volume, length);
 		Debug_MM_true((0 == _volume) == (NULL == _head));
+		Debug_MM_true((NULL == _head) == (NULL == _tail));
+		Debug_MM_true((_head != _tail) || (NULL == _head) || (_head->length == _volume));
 	}
 
 	/**
-	 * Get the next available work packet from the head of the list.
+	 * Get the next available free packet.
 	 *
 	 * @return the next work packet, if available, or NULL
 	 */
@@ -279,21 +291,27 @@ public:
 	{
 		Debug_MM_true((0 == _volume) == (NULL == _head));
 		Debug_MM_true((NULL == _head) == (NULL == _tail));
+		Debug_MM_true((_head != _tail) || (NULL == _head) || (_head->length == _volume));
 
-		MM_EvacuatorWorkPacket *take = NULL;
-		if (NULL != _head) {
-			VM_AtomicSupport::subtractU64(&_volume, _head->length);
-			take = _head;
-			_head = take->next;
-			take->next = NULL;
-			if (take == _tail) {
-				Debug_MM_true(NULL == _head);
-				_tail = NULL;
+		MM_EvacuatorWorkPacket *work = _head;
+		if (NULL != work) {
+			VM_AtomicSupport::subtractU64(&_volume, work->length);
+			if (work != _tail) {
+				Debug_MM_true(NULL != work->next);
+				_head = work->next;
+				work->next = NULL;
+			} else {
+				Debug_MM_true(NULL == work->next);
+				_head = _tail = NULL;
 			}
+			Debug_MM_true((NULL != work->base) && (0 < work->length));
 		}
 
 		Debug_MM_true((0 == _volume) == (NULL == _head));
-		return take;
+		Debug_MM_true((NULL == _head) == (NULL == _tail));
+		Debug_MM_true((_head != _tail) || (NULL == _head) || (_head->length == _volume));
+		Debug_MM_true((NULL == work) || ((NULL != work->base) && (0 < work->length)));
+		return work;
 	}
 
 	/**
@@ -306,8 +324,11 @@ public:
 	flush(MM_EvacuatorFreelist *freeList)
 	{
 		Debug_MM_true((0 == _volume) == (NULL == _head));
+		Debug_MM_true((NULL == _head) == (NULL == _tail));
+
 		VM_AtomicSupport::setU64(&_volume, 0);
 		_head = _tail = NULL;
+
 		Debug_MM_true((0 == _volume) == (NULL == _head));
 	}
 
