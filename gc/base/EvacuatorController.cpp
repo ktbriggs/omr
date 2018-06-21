@@ -98,6 +98,10 @@ MM_EvacuatorController::initialize(MM_EnvironmentBase *env)
 			return false;
 		}
 
+		for (uintptr_t workerIndex = 0; workerIndex < _maxGCThreads; workerIndex++) {
+			_evacuatorTask[workerIndex] = NULL;
+		}
+
 		/* initialize heap region bounds, copied here at the start of each gc cycle for ease of access */
 		for (intptr_t space = (intptr_t)MM_Evacuator::survivor; space <= (intptr_t)MM_Evacuator::evacuate; space += 1) {
 			_heapLayout[space][0] = NULL;
@@ -107,12 +111,12 @@ MM_EvacuatorController::initialize(MM_EnvironmentBase *env)
 
 		_history.reset();
 
-#if defined(EVACUATOR_DEBUG)
-		_debugger.setDebugFlags();
-#endif /* defined(EVACUATOR_DEBUG) */
-
 		result = (NULL != _controllerMutex);
 	}
+
+#if defined(EVACUATOR_DEBUG)
+	_debugger.setDebugFlags();
+#endif /* defined(EVACUATOR_DEBUG) */
 
 	return result;
 }
@@ -173,7 +177,7 @@ MM_EvacuatorController::flushTenureWhitespace(bool shutdown)
 		for (uintptr_t workerIndex = 0; workerIndex < _maxGCThreads; workerIndex += 1) {
 			if (NULL != _evacuatorTask[workerIndex]) {
 				Debug_MM_true(NULL == _evacuatorTask[workerIndex]->getEnvironment());
-				flushed += _evacuatorTask[workerIndex]->flushTenureWhitespace();
+				flushed += _evacuatorTask[workerIndex]->flushWhitespace(MM_Evacuator::tenure);
 			}
 		}
 		_globalTenureFlushedBytes += flushed;
@@ -210,8 +214,9 @@ MM_EvacuatorController::masterSetupForGC(MM_EnvironmentStandard *env)
 {
 	OMRPORT_ACCESS_FROM_ENVIRONMENT(env);
 
-	_evacuatorFlags = 0;
 	_evacuatorIndex = 0;
+	_evacuatorFlags = 0;
+	setEvacuatorFlag(breadthFirstScan, env->getExtensions()->scavengerScanOrdering == MM_GCExtensionsBase::OMR_GC_SCAVENGER_SCANORDERING_BREADTH_FIRST);
 	_evacuatorCount = _dispatcher->adjustThreadCount(_dispatcher->threadCount());
 	_finalDiscardedBytes = 0;
 	_finalFlushedBytes = 0;
@@ -245,18 +250,16 @@ MM_EvacuatorController::masterSetupForGC(MM_EnvironmentStandard *env)
 	_heapLayout[MM_Evacuator::tenure][0] = (uint8_t *)_extensions->_tenureBase;
 	_heapLayout[MM_Evacuator::tenure][1] = _heapLayout[MM_Evacuator::tenure][0] + _extensions->_tenureSize;
 
-	/* set upper bounds for tlh allocation size, indexed by outside region -- reduce these for small (<32mb) heaps */
-	uintptr_t copyspaceSize = maximumCopyspaceSize;
-	uintptr_t survivorSize = (uintptr_t)_heapLayout[MM_Evacuator::survivor][1] - (uintptr_t)_heapLayout[MM_Evacuator::survivor][0];
-	if (((uintptr_t)2 << 20) >= survivorSize) {
-		/* heap no more than 2mb, reduce to 25% of maximumCopyspaceSize */
-		copyspaceSize >>= 2;
-	} else if (((uintptr_t)32 << 20) >= survivorSize) {
-		/* heap more than 2mb and no more than 32mb, reduce to 50% of maximumCopyspaceSize */
-		copyspaceSize >>= 1;
+	/* set upper bounds for tlh allocation size, indexed by outside region -- reduce these for small working sets */
+	uint64_t copyspaceSize = maximumCopyspaceSize;
+	uint64_t projectedEvacuationBytes = calculateProjectedEvacuationBytes();
+
+	/* scale down tlh allocation limit until maximal cache size is small enough to ensure adequate distribution */
+	while ((copyspaceSize > minimumCopyspaceSize) && (4 * copyspaceSize * _evacuatorCount) > projectedEvacuationBytes) {
+		copyspaceSize -= minimumCopyspaceSize;
 	}
 	for (uintptr_t copyspaceIndex = (uintptr_t)MM_Evacuator::survivor; copyspaceIndex <= ((uintptr_t)MM_Evacuator::tenure); copyspaceIndex += 1) {
-		_copyspaceAllocationCeiling[copyspaceIndex] = copyspaceSize;
+		_copyspaceAllocationCeiling[copyspaceIndex] = OMR_MAX(copyspaceSize, minimumCopyspaceSize);
 		_objectAllocationCeiling[copyspaceIndex] = ~(uintptr_t)0xff;
 	}
 
@@ -291,7 +294,7 @@ MM_EvacuatorController::bindWorker(MM_EnvironmentStandard *env)
 
 	/* instantiate evacuator task for this worker thread if required (evacuators are instantiated once and persist until vm shuts down) */
 	if (NULL == _evacuatorTask[workerIndex]) {
-		_evacuatorTask[workerIndex] = MM_Evacuator::newInstance(workerIndex, this, &env->getExtensions()->objectModel, env->getExtensions()->getForge());
+		_evacuatorTask[workerIndex] = MM_Evacuator::newInstance(workerIndex, this, &_extensions->objectModel, _maxInsideCopySize, env->getExtensions()->getForge());
 	}
 
 	/* controller doesn't have final view on evacuator thread count until after tasks are dispatched ... */
@@ -489,9 +492,9 @@ MM_EvacuatorController::continueAfterStall(MM_Evacuator *worker, MM_EvacuatorWor
 void
 MM_EvacuatorController::reportProgress(MM_Evacuator *worker,  uint64_t *copied, uint64_t *scanned)
 {
-	VM_AtomicSupport::addU64(&_copiedBytes[MM_Evacuator::survivor], copied[MM_Evacuator::survivor]);
-	VM_AtomicSupport::addU64(&_copiedBytes[MM_Evacuator::tenure], copied[MM_Evacuator::tenure]);
-	VM_AtomicSupport::addU64(&_scannedBytes, *scanned);
+	uint64_t totalCopied = VM_AtomicSupport::addU64(&_copiedBytes[MM_Evacuator::survivor], copied[MM_Evacuator::survivor]);
+	totalCopied += VM_AtomicSupport::addU64(&_copiedBytes[MM_Evacuator::tenure], copied[MM_Evacuator::tenure]);
+	uint64_t totalScanned = VM_AtomicSupport::addU64(&_scannedBytes, *scanned);
 
 	copied[MM_Evacuator::survivor] = 0;
 	copied[MM_Evacuator::tenure] = 0;
@@ -502,37 +505,35 @@ MM_EvacuatorController::reportProgress(MM_Evacuator *worker,  uint64_t *copied, 
 	uint64_t tenureCopied = _copiedBytes[MM_Evacuator::tenure];
 #endif /* defined(EVACUATOR_DEBUG) */
 
-	uint64_t nextEpochCopiedBytesThreshold = _nextEpochCopiedBytesThreshold;
-	uint64_t totalCopied = _copiedBytes[MM_Evacuator::survivor] + _copiedBytes[MM_Evacuator::tenure];
-	if ((totalCopied > nextEpochCopiedBytesThreshold) || (totalCopied == _scannedBytes)) {
-		omrthread_monitor_enter(_reporterMutex);
-		MM_EvacuatorHistory::Epoch *epoch = NULL;
-		if (nextEpochCopiedBytesThreshold == _nextEpochCopiedBytesThreshold) {
-			/* conclude the epoch at the tip of epochal record */
+	if ((totalCopied == totalScanned) || (totalCopied >= _nextEpochCopiedBytesThreshold)) {
+		uint64_t nextEpochCopiedBytesThreshold = _nextEpochCopiedBytesThreshold;
+		if (nextEpochCopiedBytesThreshold == VM_AtomicSupport::lockCompareExchangeU64(&_nextEpochCopiedBytesThreshold, nextEpochCopiedBytesThreshold, nextEpochCopiedBytesThreshold + (_copiedBytesReportingDelta * _evacuatorCount))) {
 			OMRPORT_ACCESS_FROM_ENVIRONMENT(worker->getEnvironment());
 			uint64_t currentTimestamp = omrtime_hires_clock();
 			uint64_t epochDurationMicros = omrtime_hires_delta(_epochTimestamp, currentTimestamp, OMRPORT_TIME_DELTA_IN_MICROSECONDS);
-			epoch = _history.add(worker->getEnvironment()->_scavengerStats._gcCount, epochDurationMicros, totalCopied, _scannedBytes);
-			epoch->tlhAllocationCeiling = calculateOptimalWhitespaceSize();
-			epoch->releaseThreshold = (uintptr_t)calculateOptimalWorkPacketSize(0 == _scannedBytes);
-			_epochTimestamp = currentTimestamp;
-			_history.commit(epoch);
-			/* set next epochal threshold */
-			VM_AtomicSupport::setU64(&_nextEpochCopiedBytesThreshold, totalCopied + (_copiedBytesReportingDelta * _evacuatorCount));
-		}
-		omrthread_monitor_exit(_reporterMutex);
+			uintptr_t tlhAllocationCeiling = calculateOptimalWhitespaceSize(worker, MM_Evacuator::survivor);
+			uintptr_t releaseThreshold = calculateOptimalWorkPacketSize(worker->getVolumeOfWork());
+
+			if (omrthread_monitor_try_enter(_reporterMutex)) {
+				MM_EvacuatorHistory::Epoch *epoch = _history.add(worker->getEnvironment()->_scavengerStats._gcCount, epochDurationMicros, totalCopied, totalScanned);
+				epoch->tlhAllocationCeiling = tlhAllocationCeiling;
+				epoch->releaseThreshold = releaseThreshold;
+				_epochTimestamp = currentTimestamp;
+				_history.commit(epoch);
+				omrthread_monitor_exit(_reporterMutex);
+			}
 
 #if defined(EVACUATOR_DEBUG)
-		if (NULL != epoch) {
 			_debugger.setDebugCycleAndEpoch(epoch->gc, epoch->epoch);
-			if (_debugger.isDebugEpoch()) {
+			if (_debugger.isDebugEpoch() && (_epochTimestamp == currentTimestamp)) {
 				OMRPORT_ACCESS_FROM_ENVIRONMENT(worker->getEnvironment());
-				omrtty_printf("%5llu %2llu %2llu:     epoch; survivor:%llx; tenure:%llx; scanned:%llx; delta:%llx; micros:%llu; allocate:%llx; release:%llx\n",
-						epoch->gc, epoch->epoch, worker->getWorkerIndex(), survivorCopied, tenureCopied, epoch->scanned, ((survivorCopied + tenureCopied) - epoch->scanned), epoch->duration,
+				uint64_t delta = (totalCopied > epoch->scanned) ? (totalCopied - epoch->scanned) : 0;
+				omrtty_printf("%5llu %2llu %2llu:     epoch; %llx %llx %llx %llx %llx %llu %llx %llx\n", epoch->gc, epoch->epoch, worker->getWorkerIndex(),
+						_stalledEvacuatorBitmap, survivorCopied, tenureCopied, epoch->scanned, delta, epoch->duration,
 						epoch->tlhAllocationCeiling, epoch->releaseThreshold);
 			}
-		}
 #endif /* defined(EVACUATOR_DEBUG) */
+		}
 	}
 }
 
@@ -549,60 +550,43 @@ MM_EvacuatorController::calculateProjectedEvacuationBytes()
 }
 
 double
-MM_EvacuatorController::calcluateEvacuatorBandwidth()
+MM_EvacuatorController::calculateProductionScalingFactor(uint64_t evacuatorVolumeOfWork)
 {
-	return (double)(_evacuatorCount - _stalledEvacuatorCount) / (double)_evacuatorCount;
+	/* scale down by aggregate bandwidth and evacuator volume of work */
+	double queueScale = (_maximumWorkspaceSize > evacuatorVolumeOfWork) ? ((double)evacuatorVolumeOfWork / (double)_maximumWorkspaceSize) : 1.0;
+	double stallScale = (double)(_evacuatorCount - _stalledEvacuatorCount) / (double)_evacuatorCount;
+
+	/* factor must be in [0..1] */
+	return OMR_MIN(queueScale, stallScale);
 }
 
 uintptr_t
-MM_EvacuatorController::calculateOptimalWhitespaceSize()
+MM_EvacuatorController::calculateOptimalWhitespaceSize(MM_Evacuator *evacuator, MM_Evacuator::EvacuationRegion region)
 {
-	/* maximize whitespace allocation size until heap scan is nearly complete, then drop it rapidly to reduce macro fragmentation */
-	uintptr_t whitesize = MM_EvacuatorController::maximumCopyspaceSize;
+	/* be greedy with tenure allocations -- unused tenure reservations can be used in next generational gc unless flushed for global gc */
+	uintptr_t whitesize = _copyspaceAllocationCeiling[region];
 
-	/* threads stall in quick succession near the end of heap scan so scale by the square of the available evacuator bandwidth */
-	if ((3 < _evacuatorCount) && (MM_Math::floorLog2(_evacuatorCount) < _stalledEvacuatorCount)) {
-		/* use stalled thread count to guess likeihood of nearly complete scan */
-		double evacuatorBandwidth = calcluateEvacuatorBandwidth();
-		double whitespaceScaling = evacuatorBandwidth * evacuatorBandwidth;
-		whitesize = MM_EvacuatorController::minimumCopyspaceSize;
-		whitesize += (uintptr_t)(whitespaceScaling * (MM_EvacuatorController::maximumCopyspaceSize - MM_EvacuatorController::minimumCopyspaceSize));
-	}
-
-	/* limit to allocation ceiling */
-	uintptr_t limit = OMR_MIN(_copyspaceAllocationCeiling[MM_Evacuator::survivor], _copyspaceAllocationCeiling[MM_Evacuator::tenure]);
-	if (whitesize > limit) {
-		whitesize = limit;
-	}
-
-	/* round down to page size -- result will be object aligned */
-	whitesize = MM_Math::roundToFloor(MM_EvacuatorBase::tlh_allocation_granularity, whitesize);
-
-	return whitesize;
-}
-
-uintptr_t
-MM_EvacuatorController::calculateOptimalWorkPacketSize(bool isRootScan)
-{
-	/* minimize work packet size while building up shareable work during root scanning and clearing phases */
-	uintptr_t worksize = MM_EvacuatorController::minimumWorkspaceSize;
-
-	if (!isRootScan) {
-		/* during heap scan track the volume of unscanned evacuated objects */
-		uintptr_t lowVolumeOfWork = _evacuatorCount * MM_EvacuatorController::minimumWorkspaceSize;
-		uintptr_t aggegateVolumeOfWork = (_copiedBytes[MM_Evacuator::survivor] + _copiedBytes[MM_Evacuator::tenure]) - _scannedBytes;
-		if (aggegateVolumeOfWork < lowVolumeOfWork) {
-			/* scale work packet size down if there is a low aggregate volume of proven scan work */
-			worksize = MM_EvacuatorController::minimumWorkspaceSize;
-			double workspaceScaling = calcluateEvacuatorBandwidth() * ((double)aggegateVolumeOfWork / (double)lowVolumeOfWork);
-			worksize += (uintptr_t)(workspaceScaling * (MM_EvacuatorController::maximumWorkspaceSize - MM_EvacuatorController::minimumWorkspaceSize));
-		} else {
-			/* go with the maximum work packet size */
-			worksize = MM_EvacuatorController::maximumWorkspaceSize;
+	/* evacuators generate only small fragments while they are working but remainders in whitelist at end of scan may not be recyclable */
+	if (MM_Evacuator::survivor == region) {
+		/* limit survivor allocations during root/remembered/clearable scans and during tail end of heap scan */
+		uint64_t aggregateEvacuatedBytes = _copiedBytes[MM_Evacuator::survivor] + _copiedBytes[MM_Evacuator::tenure];
+		if (!evacuator->isInHeapScan() || ((4 * aggregateEvacuatedBytes) > (3 * calculateProjectedEvacuationBytes()))) {
+			/* reduce whitesize by aggregate bandwidth and volume scaling factors */
+			whitesize = (uintptr_t)(whitesize * calculateProductionScalingFactor(evacuator->getVolumeOfWork()));
 		}
 	}
 
-	return alignToObjectSize(worksize);
+	/* round down by minimum copyspace size -- result will be object aligned */
+	return MM_Math::roundToFloor(minimumCopyspaceSize, OMR_MAX(minimumCopyspaceSize, whitesize));
+}
+
+uintptr_t
+MM_EvacuatorController::calculateOptimalWorkPacketSize(uint64_t evacuatorVolumeOfWork)
+{
+	/* scale down work packet size by aggregate bandwidth and evacuator volume of work */
+	uintptr_t worksize = (uintptr_t)(_maximumWorkspaceSize * calculateProductionScalingFactor(evacuatorVolumeOfWork));
+
+	return alignToObjectSize(OMR_MAX(_minimumWorkspaceSize, worksize));
 }
 
 MM_EvacuatorWhitespace *
@@ -641,7 +625,7 @@ MM_EvacuatorController::allocateWhitespace(MM_Evacuator *evacuator, MM_Evacuator
 	uintptr_t optimalSize = 0;
 
 	/* try to allocate a tlh unless object won't fit in outside copyspace remainder and remainder is still too big to whitelist */
-	uintptr_t maximumLength = (MM_EvacuatorBase::low_work_volume < evacuator->getVolumeOfWork()) ? calculateOptimalWhitespaceSize() : minimumCopyspaceSize;
+	uintptr_t maximumLength = calculateOptimalWhitespaceSize(evacuator, region);
 	if ((minimumLength <= maximumLength) && (inside || (remainder < MM_EvacuatorBase::max_copyspace_remainder))) {
 		/* try to allocate tlh in region to contain at least minimumLength bytes */
 		optimalSize =  maximumLength;
@@ -663,8 +647,8 @@ MM_EvacuatorController::allocateWhitespace(MM_Evacuator *evacuator, MM_Evacuator
 					env->_scavengerStats._tenureSpaceAllocationCountSmall += 1;
 				}
 			} else {
-				/* lower (reduce by half) the tlh allocation ceiling for the region */
-				uintptr_t allocationCeiling = _copyspaceAllocationCeiling[region] >> 1;
+				/* lower the tlh allocation ceiling for the region */
+				uintptr_t allocationCeiling = _copyspaceAllocationCeiling[region] - minimumCopyspaceSize;
 				while (allocationCeiling < _copyspaceAllocationCeiling[region]) {
 					VM_AtomicSupport::lockCompareExchange(&_copyspaceAllocationCeiling[region], _copyspaceAllocationCeiling[region], allocationCeiling);
 				}
@@ -672,6 +656,9 @@ MM_EvacuatorController::allocateWhitespace(MM_Evacuator *evacuator, MM_Evacuator
 				optimalSize = _copyspaceAllocationCeiling[region];
 			}
 		}
+		Debug_MM_true4(evacuator->getEnvironment(), (NULL == whitespace) || (MM_EvacuatorBase::max_copyspace_remainder <= whitespace->length()),
+				"%s tlh whitespace should not be less minimum tlh size: requested=%llx; whitespace=%llx; limit=%llx\n",
+				((MM_Evacuator::survivor == region) ? "survivor" : "tenure"), minimumLength, whitespace->length(), _copyspaceAllocationCeiling[region]);
 
 		/* hand off any unused tlh allocation to evacuator to reuse later */
 		if ((NULL != whitespace) && (whitespace->length() < minimumLength)) {
@@ -682,6 +669,9 @@ MM_EvacuatorController::allocateWhitespace(MM_Evacuator *evacuator, MM_Evacuator
 
 	/* on inside allocation failure stack will shutdown and retry, copying this and subsequent objects to outside or large copyspace */
 	if (!inside && (NULL == whitespace)) {
+		Debug_MM_true3(evacuator->getEnvironment(), (minimumLength > MM_EvacuatorBase::max_copyspace_remainder) || (_copyspaceAllocationCeiling[region] < allocation_page_size),
+				"%s tlh whitespace should not be less than minimum tlh size unless under limit: requested=%llx; limit=%llx\n", ((MM_Evacuator::survivor == region) ? "survivor" : "tenure"),
+				minimumLength, _copyspaceAllocationCeiling[region]);
 		 /* allocate minimal (this object's exact) size */
 		optimalSize = minimumLength;
 		MM_AllocateDescription allocateDescription(optimalSize, 0, false, true);
@@ -708,10 +698,10 @@ MM_EvacuatorController::allocateWhitespace(MM_Evacuator *evacuator, MM_Evacuator
 #if defined(EVACUATOR_DEBUG)
 	if ((NULL != whitespace) && _debugger.isDebugAllocate()) {
 		OMRPORT_ACCESS_FROM_ENVIRONMENT(evacuator->getEnvironment());
-		omrtty_printf("%5lu %2llu %2llu:%c allocate; %s; base:%llx; length:%llx; requested:%llx; required:%llx; remainder:%llx; epoch-ceiling:%llx; copyspace-ceiling:%llx, object-ceiling:%llx)\n",
+		omrtty_printf("%5lu %2llu %2llu:%c allocate; %s; %llx %llx %llx %llx %llx %llx %llx %llx\n",
 				getEpoch()->gc, getEpoch()->epoch, evacuator->getWorkerIndex(), (inside ? 'I' : 'O'),
 				((MM_Evacuator::survivor == region) ? "survivor" : "tenure"), (uintptr_t)whitespace, ((NULL != whitespace) ? whitespace->length() : 0),
-				optimalSize, minimumLength, remainder, calculateOptimalWhitespaceSize(), _copyspaceAllocationCeiling[region], _objectAllocationCeiling[region]);
+				minimumLength, remainder, maximumLength, optimalSize, _copyspaceAllocationCeiling[region], _objectAllocationCeiling[region]);
 	}
 	if ((NULL != whitespace) && _debugger.isDebugPoisonDiscard()) {
 		MM_EvacuatorWhitespace::poison(whitespace);

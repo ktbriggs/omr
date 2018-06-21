@@ -77,13 +77,14 @@ private:
 	static const uintptr_t index_to_map_word_modulus = ((uintptr_t)1 << index_to_map_word_shift) - 1;
 
 	static const uintptr_t epochs_per_cycle = MM_EvacuatorHistory::epochs_per_cycle;
-	static const uintptr_t allocation_page_size = MM_EvacuatorBase::inside_copy_size;
+	static const uintptr_t allocation_page_size = MM_EvacuatorBase::inside_frame_width;
 
 	typedef MM_Evacuator *EvacuatorPointer;
 
 	const uintptr_t _maxGCThreads;						/* fixed for life of vm */
 	EvacuatorPointer * const _evacuatorTask;			/* array of pointers to instantiated evacuators */
 	uintptr_t _evacuatorCount;							/* number of gc threads that will participate in collection */
+	uintptr_t _maxInsideCopySize;						/* upper bound for size of objects that evacuators can copy inside stack frames */
 	omrthread_monitor_t	_controllerMutex;				/* synchronize evacuator work distribution and end of scan cycle */
 	omrthread_monitor_t	_reporterMutex;					/* synchronize collection of epochal records within gc cycle */
 	volatile uint64_t * const _boundEvacuatorBitmap;	/* maps evacuator threads that have been dispatched and bound to an evacuator instance */
@@ -101,8 +102,6 @@ private:
 
 	uint8_t *_heapLayout[3][2];							/* generational heap region bounds */
 	MM_MemorySubSpace *_memorySubspace[3];				/* pointers to memory subspaces for heap regions */
-
-	const double _limitProductionRate;
 
 protected:
 #if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
@@ -133,20 +132,24 @@ protected:
 	MM_EvacuatorHistory _history;						/* epochal record per gc cycle */
 
 public:
-	static const uintptr_t minimumCopyspaceSize = MM_EvacuatorBase::min_tlh_allocation_size; /* hard lower bound for tlh copyspace allocation size */
-	static const uintptr_t maximumCopyspaceSize = MM_EvacuatorBase::max_tlh_allocation_size; /* hard upper bound for tlh copyspace allocation size */
-
-	static const uintptr_t minimumWorkspaceSize = MM_EvacuatorBase::min_work_packet_size; /* hard lower bound for work packet size */
-	static const uintptr_t maximumWorkspaceSize = MM_EvacuatorBase::min_work_packet_size; /* hard upper bound for work packet size */
-
+	/* boundary between public (delegate, low 16 bits) and private (evacuator, high 16 bits) evacuation flags */
 	static const uintptr_t max_evacuator_public_flag = (uintptr_t)1 << 15;
-	static const uintptr_t min_evacuator_private_flag = (uintptr_t)1 << 16;
+	static const uintptr_t min_evacuator_private_flag = max_evacuator_public_flag << 1;
 
+	/* private evacuation flags */
 	enum {
-		rescanThreadSlots 	= min_evacuator_private_flag << 0
-		, completing		= min_evacuator_private_flag << 1
-		, aborting			= min_evacuator_private_flag << 2
+		breadthFirstScan	= min_evacuator_private_flag << 0	/* copy breadth first (inhibit stack push) */
+		, rescanThreadSlots = min_evacuator_private_flag << 1	/* rescan threads after first heap scan, before clearing */
+		, aborting			= min_evacuator_private_flag << 2	/* an evacuator has failed and so gc cycle is aborting */
 	};
+
+	/* hard lower and upper bounds for whitespace allocation and bound to tlh size */
+	static const uintptr_t minimumCopyspaceSize = MM_EvacuatorBase::min_tlh_allocation_size;
+	static const uintptr_t maximumCopyspaceSize = MM_EvacuatorBase::max_tlh_allocation_size;
+
+	/* hard lower bound for work packet size can be overridden by configurable bounds */
+	const uintptr_t _minimumWorkspaceSize;
+	const uintptr_t _maximumWorkspaceSize;
 
 	OMR_VM *_omrVM;
 #if defined(EVACUATOR_DEBUG)
@@ -166,11 +169,11 @@ private:
 	/* calculate a rough overestimate of the amount of matter that will be evacuated to survivor or tenure in current cycle */
 	uint64_t  calculateProjectedEvacuationBytes();
 
-	/* calculate whitespace allocation size considering volume of remaining survivor space and current ratio of unscanned/scanned bytes */
-	uintptr_t calculateOptimalWhitespaceSize();
+	/* calculate a scaling factor in [0..1] for throttling whitespace allocation and work packet sizes */
+	double calculateProductionScalingFactor(uint64_t evacuatorVolumeOfWork);
 
-	/* this is the ratio of running evacuators vs evacuator count */
-	double calcluateEvacuatorBandwidth();
+	/* calculate whitespace allocation size considering evacuator's production scaling factor */
+	uintptr_t calculateOptimalWhitespaceSize(MM_Evacuator *evacuator, MM_Evacuator::EvacuationRegion region);
 
 	/* allocate and NULL-fill evacuator pointer array (evacuators instantiated at gc start as required) */
 	static EvacuatorPointer *
@@ -292,6 +295,8 @@ protected:
 	virtual void masterSetupForGC(MM_EnvironmentStandard *env);
 
 public:
+	MM_GCExtensionsBase * const getExtensions() { return _extensions; }
+
 	/**
 	 * Controller delegates backout and remembered set to subclass
 	 *
@@ -423,10 +428,10 @@ public:
 	 * Calculate threshold for releasing work packets from outside copyspaces considering current aggregate
 	 * volume of queued work and evacuator thread bandwidth.
 	 *
-	 * @param isRootScan true if the calling evacuator is evacuating root or clearable objects and has an empty scan stack
+	 * @param evacuatorVolumeOfWork the amount (bytes) of unscanned work in caller's worklist
 	 * @return the minimum number of unscanned bytes to accumulate in outside copyspaces before releasing a work packet
 	 */
-	uintptr_t calculateOptimalWorkPacketSize(bool isRootScan);
+	uintptr_t calculateOptimalWorkPacketSize(uint64_t evacuatorVolumeOfWork);
 
 	/**
 	 * Evacuator must call this before synchronizing with other evacuator threads through the MM_ParallelTask
@@ -531,11 +536,14 @@ public:
 	/**
 	 * Constructor
 	 */
+#define EVACUATOR_INSIDE_SIZE(W,X,Y) ((((W) <= (X)) && ((Y) >= (X))) ? (X) : (Y))
+#define EVACUATOR_WORKSPACE_SIZE(X,Y) (((X) >= (Y)) ? ((Y) >> 1) : (X))
 	MM_EvacuatorController(MM_EnvironmentBase *env)
 		: MM_Collector()
 		, _maxGCThreads(((MM_ParallelDispatcher *)env->getExtensions()->dispatcher)->threadCountMaximum())
 		, _evacuatorTask(allocateEvacuatorArray(env, _maxGCThreads))
 		, _evacuatorCount(0)
+		, _maxInsideCopySize(EVACUATOR_INSIDE_SIZE(MM_EvacuatorBase::min_inside_object_size, env->getExtensions()->evacuatorMaximumInsideCopySize, MM_EvacuatorBase::max_inside_object_size))
 		, _controllerMutex(NULL)
 		, _reporterMutex(NULL)
 		, _boundEvacuatorBitmap(allocateEvacuatorBitmap(env, _maxGCThreads))
@@ -548,7 +556,6 @@ public:
 		, _nextEpochCopiedBytesThreshold(0)
 		, _copiedBytesReportingDelta(0)
 		, _epochTimestamp(0)
-		, _limitProductionRate(EVACUATOR_LIMIT_PRODUCTION_RATE)
 #if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 		, _collectorStartTime(0)
 #endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
@@ -569,12 +576,16 @@ public:
 		, _evacuateSpaceTop(NULL)
 		, _survivorSpaceBase(NULL)
 		, _survivorSpaceTop(NULL)
+		, _minimumWorkspaceSize(_extensions->objectModel.adjustSizeInBytes(EVACUATOR_WORKSPACE_SIZE(_extensions->scavengerScanCacheMinimumSize, DEFAULT_SCAN_CACHE_MINIMUM_SIZE)))
+		, _maximumWorkspaceSize(_extensions->objectModel.adjustSizeInBytes(EVACUATOR_WORKSPACE_SIZE(_extensions->scavengerScanCacheMaximumSize, DEFAULT_SCAN_CACHE_MAXIMUM_SIZE)))
 		, _omrVM(env->getOmrVM())
 	{
 		_typeId = __FUNCTION__;
 		_copiedBytes[MM_Evacuator::survivor] = 0;
 		_copiedBytes[MM_Evacuator::tenure] = 0;
 	}
+#undef EVACUATOR_INSIDE_SIZE
+#undef EVACUATOR_WORKSPACE_SIZE
 
 #if defined(EVACUATOR_DEBUG)
 	uintptr_t sampleEvacuatorFlags() { return _evacuatorFlags; }

@@ -753,8 +753,12 @@ MM_Scavenger::mergeGCStatsBase(MM_EnvironmentBase *env, MM_ScavengerStats *final
 	for (uintptr_t i = 0; i < OMR_SCAVENGER_CACHESIZE_BINS; i++) {
 		finalGCStats->_copy_cachesize_counts[i] += scavStats->_copy_cachesize_counts[i];
 	}
-	finalGCStats->_leafObjectCount += scavStats->_leafObjectCount;
 	finalGCStats->_copy_cachesize_sum += scavStats->_copy_cachesize_sum;
+	for (uintptr_t i = 0; i < OMR_SCAVENGER_CACHESIZE_BINS; i++) {
+		finalGCStats->_work_packetsize_counts[i] += scavStats->_work_packetsize_counts[i];
+	}
+	finalGCStats->_work_packetsize_sum += scavStats->_work_packetsize_sum;
+	finalGCStats->_leafObjectCount += scavStats->_leafObjectCount;
 	finalGCStats->_workStallTime += scavStats->_workStallTime;
 	finalGCStats->_completeStallTime += scavStats->_completeStallTime;
 	finalGCStats->_syncStallTime += scavStats->_syncStallTime;
@@ -935,8 +939,6 @@ MM_Scavenger::calculateOptimumCopyScanCacheSize(MM_EnvironmentStandard *env)
 		cacheSize = OMR_MIN(cacheSizeBasedOnScanCacheCount, cacheSize);
 	}
 
-	env->_scavengerStats.countCopyCacheSize(cacheSize, maxCacheSize);
-
 #if defined(J9MODRON_SCAVENGER_TRACE)
     PORT_ACCESS_FROM_ENVIRONMENT(env);
     j9tty_printf(PORTLIB, "{SCAV: scanCacheSize %zu}\n", cacheSize);
@@ -983,6 +985,7 @@ MM_Scavenger::reserveMemoryForAllocateInSemiSpace(MM_EnvironmentStandard *env, o
 					addrTop = (void *)(((uint8_t *)addrBase) + cacheSize);
 					/* Check that there is no overflow */
 					Assert_MM_true(addrTop >= addrBase);
+					env->_scavengerStats.countCopyCacheSize(cacheSize, _extensions->scavengerScanCacheMaximumSize);
 					allocateResult = true;
 				}
 				env->_scavengerStats._semiSpaceAllocationCountLarge += 1;
@@ -991,6 +994,9 @@ MM_Scavenger::reserveMemoryForAllocateInSemiSpace(MM_EnvironmentStandard *env, o
 				/* Update the optimum scan cache size */
 				uintptr_t scanCacheSize = calculateOptimumCopyScanCacheSize(env);
 				allocateResult = (NULL != _survivorMemorySubSpace->collectorAllocateTLH(env, this, &allocDescription, scanCacheSize, addrBase, addrTop));
+				if (allocateResult) {
+					env->_scavengerStats.countCopyCacheSize((uintptr_t)addrTop - (uintptr_t)addrBase, _extensions->scavengerScanCacheMaximumSize);
+				}
 				env->_scavengerStats._semiSpaceAllocationCountSmall += 1;
 			}
 		}
@@ -1085,6 +1091,7 @@ MM_Scavenger::reserveMemoryForAllocateInTenureSpace(MM_EnvironmentStandard *env,
 					addrTop = (void *)(((uint8_t *)addrBase) + cacheSize);
 					/* Check that there is no overflow */
 					Assert_MM_true(addrTop >= addrBase);
+					env->_scavengerStats.countCopyCacheSize(cacheSize, _extensions->scavengerScanCacheMaximumSize);
 					allocateResult = true;
 
 #if defined(OMR_GC_LARGE_OBJECT_AREA)
@@ -1099,6 +1106,9 @@ MM_Scavenger::reserveMemoryForAllocateInTenureSpace(MM_EnvironmentStandard *env,
 				allocDescription.setCollectorAllocateExpandOnFailure(true);
 				uintptr_t scanCacheSize = calculateOptimumCopyScanCacheSize(env);
 				allocateResult = (NULL != _tenureMemorySubSpace->collectorAllocateTLH(env, this, &allocDescription, scanCacheSize, addrBase, addrTop));
+				if (allocateResult) {
+					env->_scavengerStats.countCopyCacheSize((uintptr_t)addrTop - (uintptr_t)addrBase, _extensions->scavengerScanCacheMaximumSize);
+				}
 
 #if defined(OMR_GC_LARGE_OBJECT_AREA)
 				if (allocateResult && allocDescription.isLOAAllocation()) {
@@ -1917,6 +1927,7 @@ MM_Scavenger::getNextScanCache(MM_EnvironmentStandard *env)
 				omrtty_printf("{SCAV: slaveID %zu _cachedEntryCount %zu _waitingCount %zu Scan cache from list (%p)}\n", env->getSlaveID(), _cachedEntryCount, _waitingCount, cache);
 #endif /* OMR_SCAVENGER_TRACE */
 
+				env->_scavengerStats.countWorkPacketSize(((uintptr_t)cache->cacheAlloc - (uintptr_t)cache->scanCurrent), _maximumWorkspaceSize);
 				return cache;
 			}
 		}
@@ -2709,15 +2720,16 @@ MM_Scavenger::scavengeRememberedSetList(MM_EnvironmentStandard *env)
 				*slotPtr = (omrobjectptr_t)((uintptr_t)*slotPtr | DEFERRED_RS_REMOVE_FLAG);
 
 				/* Update remembered state for this tenured object -- if still remembered we can clear removal flag here */
-				bool shouldBeRemembered = isRememberedThreadReference(env, objectPtr);
-				if (!_extensions->isEvacuatorEnabled()) {
-					shouldBeRemembered |= scavengeObjectSlots(env, NULL, objectPtr, GC_ObjectScanner::scanRoots, slotPtr);
+				bool shouldBeRemembered = false;
+				if (_extensions->isEvacuatorEnabled()) {
+					shouldBeRemembered = env->getEvacuator()->evacuateRememberedObjectReferents(objectPtr);
+				} else {
+					shouldBeRemembered = scavengeObjectSlots(env, NULL, objectPtr, GC_ObjectScanner::scanRoots, slotPtr);
 					if (_extensions->objectModel.hasIndirectObjectReferents((CLI_THREAD_TYPE*)env->getLanguageVMThread(), objectPtr)) {
 						shouldBeRemembered |= _cli->scavenger_scavengeIndirectObjectSlots(env, objectPtr);
 					}
-				} else {
-					shouldBeRemembered |= env->getEvacuator()->evacuateRememberedObjectReferents(objectPtr);
 				}
+				shouldBeRemembered |= isRememberedThreadReference(env, objectPtr);
 				if (shouldBeRemembered) {
 					/* We want to retain this object in the remembered set so clear the flag for removal. */
 					*slotPtr = (omrobjectptr_t)((uintptr_t)*slotPtr & ~DEFERRED_RS_REMOVE_FLAG);
@@ -3803,6 +3815,11 @@ MM_Scavenger::masterThreadGarbageCollect(MM_EnvironmentBase *envBase, MM_Allocat
 				omrtty_printf(" %llu", stats->_copy_cachesize_counts[cachesize]);
 			}
 			omrtty_printf(" %llx\n", stats->_copy_cachesize_sum);
+			omrtty_printf("%5llu      :  worksize;", stats->_gcCount);
+			for (uintptr_t worksize = 0; worksize < OMR_SCAVENGER_CACHESIZE_BINS; worksize += 1) {
+				omrtty_printf(" %llu", stats->_work_packetsize_counts[worksize]);
+			}
+			omrtty_printf(" %llx\n", stats->_work_packetsize_sum);
 			omrtty_printf("%5llu      :     small;", stats->_gcCount);
 			for (uintptr_t smallsize = 0; smallsize <= OMR_SCAVENGER_DISTANCE_BINS; smallsize += 1) {
 				omrtty_printf(" %llu", stats->_small_object_counts[smallsize]);
@@ -3823,18 +3840,21 @@ MM_Scavenger::masterThreadGarbageCollect(MM_EnvironmentBase *envBase, MM_Allocat
 				scavengeMicros);
 			uintptr_t scavengeBytes = stats->_flipBytes + stats->_tenureAggregateBytes;
 			if (!_extensions->isEvacuatorEnabled()) {
-				omrtty_printf("%5llu      :%10s; %llx 0 0 %llx\n", stats->_gcCount, scavengeCompletedSuccessfully(env) ? "end cycle" : "backout",
-						scavengeBytes, stats->_flipDiscardBytes + stats->_tenureDiscardBytes);
+				uint64_t insideBytes = (scavengeBytes > stats->_work_packetsize_sum) ? (scavengeBytes - stats->_work_packetsize_sum) : 0;
+				omrtty_printf("%5llu      :%10s; %llx 0 %llx %llx 0 %llx\n", stats->_gcCount, scavengeCompletedSuccessfully(env) ? "end cycle" : "backout",
+						scavengeBytes, insideBytes, stats->_tenureAggregateBytes, stats->_flipDiscardBytes + stats->_tenureDiscardBytes);
 			} else {
 				/* evacuator copied/scanned byte counts may include bytes added on 1st generational copy and not included in stats byte counts */
 				uint64_t evacuatedBytes = _copiedBytes[MM_Evacuator::survivor] + _copiedBytes[MM_Evacuator::tenure];
 				/* so adjust reported evacuator scanned byte count by subtracting the difference between evacuator and scavenger copied byte counts */
 				uint64_t scannedBytes = _scannedBytes - (evacuatedBytes - scavengeBytes);
-				omrtty_printf("%5llu %2llu   :%10s; %llx %llx %llx %llx\n", getEpoch()->gc, getEpoch()->epoch, isAborting() ? "backout" : "end cycle",
-						scavengeBytes, scannedBytes, _finalDiscardedBytes, _finalFlushedBytes);
+				/* bytes copied inside stack frames */
+				uint64_t insideBytes = evacuatedBytes - stats->_work_packetsize_sum;
+				omrtty_printf("%5llu %2llu   :%10s; %llx %llx %llx %llx %llx %llx\n", getEpoch()->gc, getEpoch()->epoch, isAborting() ? "backout" : "end cycle",
+						scavengeBytes, scannedBytes, insideBytes, _copiedBytes[MM_Evacuator::tenure], _finalDiscardedBytes, _finalFlushedBytes);
 				/* total copied/scanned byte counts should be equal unless we are aborting */
-				Assert_MM_true((scavengeBytes == scannedBytes) || isAborting());
 				Assert_MM_true((evacuatedBytes == _scannedBytes) || isAborting());
+				Assert_MM_true((scavengeBytes == scannedBytes) || isAborting());
 				Assert_MM_true(isAborting() == !scavengeCompletedSuccessfully(env));
 			}
 #if defined(EVACUATOR_DEBUG)

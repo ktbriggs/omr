@@ -59,6 +59,7 @@ public:
 	} EvacuationRegion;
 
 private:
+	const uintptr_t _maxInsideCopySize;				/* limit on size of object that can be copied inside stack frames */
 	const uintptr_t _workerIndex;					/* controller's index of this evacuator */
 	MM_EnvironmentStandard *_env;					/* collecting thread environment (this thread) */
 	MM_EvacuatorController * const _controller;		/* controller provides collective services and instrumentation */
@@ -100,19 +101,20 @@ public:
  */
 private:
 	MMINLINE bool isAbortedCycle();
-	MMINLINE bool isBreadthFirst() { return _env->getExtensions()->scavengerScanOrdering == MM_GCExtensionsBase::OMR_GC_SCAVENGER_SCANORDERING_BREADTH_FIRST; }
+	MMINLINE bool isBreadthFirst();
 	MMINLINE void debugStack(const char *stackOp, bool treatAsWork = false);
 
 	MMINLINE void addWork(MM_EvacuatorWorkPacket *work);
 	MMINLINE MM_EvacuatorWorkPacket *findWork();
 	MMINLINE MM_EvacuatorWorkPacket *loadWork();
 
-	MMINLINE GC_ObjectScanner *nextObjectScanner(MM_EvacuatorScanspace *scanspace, uintptr_t scannedBytes = 0);
+	MMINLINE GC_ObjectScanner *getObjectScanner(omrobjectptr_t objectPtr, GC_ObjectScannerState *scannerSpace, uintptr_t flags);
+	MMINLINE GC_ObjectScanner *nextObjectScanner(MM_EvacuatorScanspace *scanspace, bool finalizeObjectScan = true);
 	MMINLINE void push(MM_EvacuatorWorkPacket *work);
 	MMINLINE void push(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy);
 	MMINLINE void pop();
 	MMINLINE void flush(GC_SlotObject *slotObject);
-	MMINLINE void setStackLimit();
+	MMINLINE bool setStackLimit();
 
 	MMINLINE bool reserveInsideCopyspace(uintptr_t slotObjectSizeAfterCopy);
 	MMINLINE GC_SlotObject *copyInside(uintptr_t *slotObjectSizeBeforeCopy, uintptr_t *slotObjectSizeAfterCopy, EvacuationRegion *evacuationRegion);
@@ -132,7 +134,10 @@ private:
 	bool scanClearable();
 	void scanComplete();
 
-	void flushForWaitState();
+	void rememberObject(omrobjectptr_t object, bool isThreadSlot = false);
+	MMINLINE bool isNurseryAge(uintptr_t objectAge) { return (0 == (((uintptr_t)1 << objectAge) & _tenureMask)); }
+	MMINLINE void flushForWaitState();
+	MMINLINE void flushRememberedSet();
 
 #if defined(EVACUATOR_DEBUG) || defined(J9MODRON_TGC_PARALLEL_STATISTICS)
 	MMINLINE uint64_t startWaitTimer();
@@ -153,7 +158,7 @@ public:
 	 * @param forge the system memory allocator
 	 * @return an evacuator instance
 	 */
-	static MM_Evacuator *newInstance(uintptr_t workerIndex, MM_EvacuatorController *controller, GC_ObjectModel *objectModel, MM_Forge *forge);
+	static MM_Evacuator *newInstance(uintptr_t workerIndex, MM_EvacuatorController *controller, GC_ObjectModel *objectModel, uintptr_t maxInsideCopySize, MM_Forge *forge);
 
 	/**
 	 * Terminate and deallocate evacuator instance
@@ -177,17 +182,8 @@ public:
 	MMINLINE bool isInEvacuate(void *address) { return (_heapBounds[evacuate][0] <= (uint8_t *)address) && ((uint8_t *)address < _heapBounds[evacuate][1]); }
 	MMINLINE bool isInSurvivor(void *address) { return (_heapBounds[survivor][0] <= (uint8_t *)address) && ((uint8_t *)address < _heapBounds[survivor][1]); }
 	MMINLINE bool isInTenure(void *address) { return _env->getExtensions()->isOld((omrobjectptr_t)address); }
-	MMINLINE bool isNurseryAge(uintptr_t objectAge) { return (0 == (((uintptr_t)1 << objectAge) & _tenureMask)); }
 
-	MMINLINE GC_ObjectScanner *
-	getObjectScanner(omrobjectptr_t objectPtr, GC_ObjectScannerState *scannerSpace, uintptr_t flags)
-	{
-		return _delegate.getObjectScanner(objectPtr, scannerSpace, flags);
-	}
-
-	void rememberObject(omrobjectptr_t object);
-	void flushRememberedSet();
-	uintptr_t flushTenureWhitespace();
+	uintptr_t flushWhitespace(EvacuationRegion region);
 
 	MMINLINE EvacuationRegion
 	getEvacuationRegion(void *address)
@@ -313,15 +309,20 @@ public:
 	bool evacuateHeap();
 
 	/**
+	 * Returns true if evacuator is scanning on stack
+	 */
+	bool isInHeapScan() { return (NULL != _scanStackFrame); }
+
+	/**
+	 * Controller calls this to get the volume of work available on the evacator's work queue.
+	 */
+	uint64_t getVolumeOfWork() { return *(_workList.volume()); }
+
+	/**
 	 * Controller calls this when it allocates a TLH from survivor or tenure region that is too small to hold
 	 * the current object. The evacuator adds the unused TLH to the whitelist for the containing region.
 	 */
 	void receiveWhitespace(MM_EvacuatorWhitespace *whitespace);
-
-	/**
-	 * Controller calls this to obtain value reflecting the volume of work available on the evacator's work queue.
-	 */
-	uint64_t getVolumeOfWork() { return *(_workList.volume()); }
 
 	/**
 	 * Per gc, bind evacuator instance to worker thread and set up evacuator environment, clear evacuator gc stats
@@ -343,8 +344,9 @@ public:
 	 * @param env worker thread environment
 	 * @param dispatcher the dispatcher that is starting this evacuator
 	 */
-	MM_Evacuator(uintptr_t workerIndex, MM_EvacuatorController *controller, GC_ObjectModel *objectModel, MM_Forge *forge)
+	MM_Evacuator(uintptr_t workerIndex, MM_EvacuatorController *controller, GC_ObjectModel *objectModel, uintptr_t maxInsideCopySize, MM_Forge *forge)
 		: MM_BaseNonVirtual()
+		, _maxInsideCopySize(maxInsideCopySize)
 		, _workerIndex(workerIndex)
 		, _env(NULL)
 		, _controller(controller)
