@@ -33,6 +33,7 @@
 #include "EvacuatorBase.hpp"
 #include "GCExtensionsBase.hpp"
 #include "HeapLinkedFreeHeader.hpp"
+#include "MemoryPoolAddressOrderedList.hpp"
 #include "MemorySubSpace.hpp"
 #include "ObjectModelBase.hpp"
 #include "ScavengerStats.hpp"
@@ -101,6 +102,7 @@ private:
 	uintptr_t _flushed;														/* cumulative sum of bytes flushed as heap holes */
 	MM_EnvironmentBase * _env;												/* for port library access for discard trace */
 	MM_MemorySubSpace *_subspace;											/* memory subspace receives discarded fragments */
+	MM_MemoryPoolAddressOrderedList *_memoryPool;							/* HACK: this assumes AOL memory pool */
 	MM_ScavengerStats *_stats;												/* pointer to _env->_scavengerStats */
 	uintptr_t _index;														/* evacuator worker index for discard trace */
 	bool _tenure;															/* true if managing tenure whitespace */
@@ -235,32 +237,42 @@ private:
 	MMINLINE void
 	discard(MM_EvacuatorWhitespace *discard, bool flushing = false)
 	{
-		/* tail holds largest discard from the whitelist (ie, tail is not longer than any whitespace in the whitelist) */
-		if (!flushing && (discard->length() > MM_EvacuatorBase::max_scanspace_remainder) &&
-				((NULL == _tail) || (discard->length() > _tail->length()))
-		) {
-			/* swap hole into tail and set up previous tail for discard */
-			MM_EvacuatorWhitespace *tail = _tail;
-			_tail = discard;
-			discard = tail;
-		}
+		uintptr_t discarded = (NULL != discard) ? discard->length() : 0;
+		if (0 < discarded) {
+			/* tail holds largest discard from the whitelist (ie, tail is not longer than any whitespace in the whitelist) */
+			if (!flushing && (discard->length() > MM_EvacuatorBase::max_scanspace_remainder) &&
+					((NULL == _tail) || (discard->length() > _tail->length()))
+			) {
+				/* swap hole into tail and set up previous tail for discard */
+				MM_EvacuatorWhitespace *tail = _tail;
+				_tail = discard;
+				if (NULL != tail) {
+					discarded = tail->length();
+					discard = tail;
+				} else {
+					return;
+				}
+			}
 
-		/* fill discards with holes to keep runtime heap walkable */
-		uintptr_t discarded = 0;
-		if (NULL != discard) {
-			discarded = discard->length();
-			_subspace->abandonHeapChunk(discard, (void *)((uintptr_t)discard + discarded));
+			/* recycle or fill discards with holes to keep runtime heap walkable */
+			void *top = (void *)((uintptr_t)discard + discarded);
+			if (_tenure || !flushing || (MM_EvacuatorBase::min_tlh_allocation_size > discarded)) {
+				_subspace->abandonHeapChunk(discard, top);
+			} else if ((0 == discarded) || _memoryPool->recycleHeapChunk(discard, top)) {
+				return;
+			}
+
 			if (flushing) {
 				_flushed += discarded;
 			} else {
 				_discarded += discarded;
 			}
-		}
 
 #if defined(EVACUATOR_DEBUG)
-		verify();
-		debug(discard, flushing ? "flush" : "discard");
+			verify();
+			debug(discard, flushing ? "flush" : "discard");
 #endif /* defined(EVACUATOR_DEBUG) */
+		}
 	}
 
 protected:
@@ -438,6 +450,7 @@ public:
 		_env = env;
 		_index = evacuatorIndex;
 		_subspace = subspace;
+		_memoryPool = (MM_MemoryPoolAddressOrderedList *)_subspace->getMemoryPool();
 		_stats = &_env->_scavengerStats;
 		_discarded = 0;
 		if (!isTenure) {
@@ -471,6 +484,7 @@ public:
 		, _flushed(0)
 		, _env(NULL)
 		, _subspace(NULL)
+		, _memoryPool(NULL)
 		, _stats(NULL)
 		, _index(0)
 		, _tenure(false)

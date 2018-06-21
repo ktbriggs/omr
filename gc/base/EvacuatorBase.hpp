@@ -24,7 +24,7 @@
 #define EVACUATORBASE_HPP_
 
 #undef EVACUATOR_DEBUG
-#undef EVACUATOR_DEBUG_ALWAYS
+#define EVACUATOR_DEBUG_ALWAYS
 
 #if defined(EVACUATOR_DEBUG)
 #include "omrgcconsts.h"
@@ -39,11 +39,12 @@
 #define EVACUATOR_DEBUG_WORK 8
 #define EVACUATOR_DEBUG_STACK 16
 #define EVACUATOR_DEBUG_COPY 32
-#define EVACUATOR_DEBUG_ALLOCATE 64
-#define EVACUATOR_DEBUG_WHITELISTS 128
-#define EVACUATOR_DEBUG_POISON_DISCARD 256
-#define EVACUATOR_DEBUG_BACKOUT 512
-#define EVACUATOR_DEBUG_DELEGATE 1024
+#define EVACUATOR_DEBUG_REMEMBERED 64
+#define EVACUATOR_DEBUG_ALLOCATE 128
+#define EVACUATOR_DEBUG_WHITELISTS 256
+#define EVACUATOR_DEBUG_POISON_DISCARD 512
+#define EVACUATOR_DEBUG_BACKOUT 1024
+#define EVACUATOR_DEBUG_DELEGATE 2048
 
 /* default debug flags */
 #define EVACUATOR_DEBUG_DEFAULT_FLAGS (0)
@@ -71,9 +72,6 @@
 #error "Scan cache default sizes must satisfy DEFAULT_SCAN_CACHE_MINIMUM_SIZE <= (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3)"
 #endif /* (DEFAULT_SCAN_CACHE_MINIMUM_SIZE > (DEFAULT_SCAN_CACHE_MAXIMUM_SIZE >> 3)) */
 
-/* this value is used as lower bound for peak copy production rate (copied/scanned) -- lower values are used to scale allocation and work release sizes */
-#define EVACUATOR_LIMIT_PRODUCTION_RATE 1.125 /* C++ does not allow static const declarations for non-integer types */
-
 class MM_EvacuatorBase
 {
 /**
@@ -95,12 +93,11 @@ public:
 	static const uintptr_t low_work_volume = MINIMUM_TLH_SIZE;
 
 	/* hard bounds for TLH allocation size */
-	static const uintptr_t min_tlh_allocation_size = DEFAULT_SCAN_CACHE_MINIMUM_SIZE;
+	static const uintptr_t min_tlh_allocation_size = DEFAULT_SCAN_CACHE_MINIMUM_SIZE << 1;
 	static const uintptr_t max_tlh_allocation_size = DEFAULT_SCAN_CACHE_MAXIMUM_SIZE;
-	static const uintptr_t tlh_allocation_granularity = 4096;
 
 	/* hard bounds for work packet size */
-	static const uintptr_t min_work_packet_size = min_tlh_allocation_size << 1;
+	static const uintptr_t min_work_packet_size = min_tlh_allocation_size >> 1;
 	static const uintptr_t max_work_packet_size = max_tlh_allocation_size >> 1;
 
 	/* largest amount of whitespace that can be discarded from the scan stack and outside copyspaces */
@@ -116,15 +113,12 @@ public:
 
 	/* Actual maximal size of scan stack -- operational limit may be lowered to increase outside copying */
 	static const uintptr_t max_scan_stack_depth = 32;
+	/* Object size threshold for copying inside -cannot be set to a value lower than this */
+	static const uintptr_t min_inside_object_size = 64;
 	/* Object size threshold for copying inside -- larger objects are always copied to outside copyspaces */
 	static const uintptr_t max_inside_object_size = 256;
-
-	/* base 2 log of upper bound on distance from base to copy head in stack scan frame*/
-	static const uintptr_t inside_copy_log_size = 12;
-	/* upper bound on distance from base to copy head */
-	static const uintptr_t inside_copy_size = (uintptr_t)1 << inside_copy_log_size;
-	/* used to set actual bound on copy head at next page boundary within stack scan frame */
-	static const uintptr_t inside_copy_mask = inside_copy_size - 1;
+	/* upper bound on distance from base to copy head -- value must be a multiple of object alignment and <min_tlh_allocation_size */
+	static const uintptr_t inside_frame_width = 4096;
 
 	/* number of elements in whitelist backing array must be (2^N)-1 for some N */
 	static const uintptr_t max_whitelist = 15;
@@ -181,6 +175,7 @@ public:
 	MMINLINE bool isDebugStack() { return isDebugFlagSet(EVACUATOR_DEBUG_STACK); }
 	MMINLINE bool isDebugWork() { return isDebugFlagSet(EVACUATOR_DEBUG_WORK); }
 	MMINLINE bool isDebugCopy() { return isDebugFlagSet(EVACUATOR_DEBUG_COPY); }
+	MMINLINE bool isDebugRemembered() { return isDebugFlagSet(EVACUATOR_DEBUG_REMEMBERED); }
 	MMINLINE bool isDebugWhitelists() { return isDebugFlagSet(EVACUATOR_DEBUG_WHITELISTS); }
 	MMINLINE bool isDebugPoisonDiscard() { return isDebugFlagSet(EVACUATOR_DEBUG_POISON_DISCARD); }
 	MMINLINE bool isDebugAllocate() { return isDebugFlagSet(EVACUATOR_DEBUG_ALLOCATE); }
@@ -200,6 +195,7 @@ public:
 	MMINLINE bool isDebugWork() { return false; }
 	MMINLINE bool isDebugStack() { return false; }
 	MMINLINE bool isDebugCopy() { return false; }
+	MMINLINE bool isDebugRemembered() { return false; }
 	MMINLINE bool isDebugWhitelists() { return false; }
 	MMINLINE bool isDebugPoisonDiscard() { return false; }
 	MMINLINE bool isDebugAllocate() { return false; }

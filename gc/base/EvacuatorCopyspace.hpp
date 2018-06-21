@@ -137,6 +137,11 @@ public:
 		Debug_MM_true((_base <= _copy) && (_copy <= _end));
 	}
 
+	/*
+	 * Reset this copyspace to an empty state
+	 */
+	MMINLINE void resetCopyspace() { setCopyspace(NULL, NULL, 0, false); }
+
 	/**
 	 * Advance the copy pointer to end of most recently copied object.
 	 *

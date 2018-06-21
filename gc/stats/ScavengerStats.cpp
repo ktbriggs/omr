@@ -85,6 +85,7 @@ MM_ScavengerStats::MM_ScavengerStats()
 	,_tenureExpandedTime(0)
 	,_leafObjectCount(0)
 	,_copy_cachesize_sum(0)
+	,_work_packetsize_sum(0)
 	,_slotsCopied(0)
 	,_slotsScanned(0)
 
@@ -93,6 +94,7 @@ MM_ScavengerStats::MM_ScavengerStats()
 	memset(_flipHistory, 0, sizeof(_flipHistory));
 	memset(_copy_distance_counts, 0, sizeof(_copy_distance_counts));
 	memset(_copy_cachesize_counts, 0, sizeof(_copy_cachesize_counts));
+	memset(_work_packetsize_counts, 0, sizeof(_work_packetsize_counts));
 	memset(_small_object_counts, 0, sizeof(_small_object_counts));
 	memset(_large_object_counts, 0, sizeof(_large_object_counts));
 }
@@ -185,8 +187,10 @@ MM_ScavengerStats::clear(bool firstIncrement)
 	_slotsScanned = 0;
 	_leafObjectCount = 0;
 	_copy_cachesize_sum = 0;
+	_work_packetsize_sum = 0;
 	memset(_copy_distance_counts, 0, sizeof(_copy_distance_counts));
 	memset(_copy_cachesize_counts, 0, sizeof(_copy_cachesize_counts));
+	memset(_work_packetsize_counts, 0, sizeof(_work_packetsize_counts));
 	memset(_small_object_counts, 0, sizeof(_small_object_counts));
 	memset(_large_object_counts, 0, sizeof(_large_object_counts));
 };
