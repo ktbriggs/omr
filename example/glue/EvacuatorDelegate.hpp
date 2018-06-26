@@ -55,10 +55,10 @@ public:
 		unused = 1
 	};
 private:
-	MM_EnvironmentStandard *_env;
-	MM_Scavenger *_controller;
-	MM_Evacuator *_evacuator;
-	bool _isCleared;
+	MM_EnvironmentStandard *_env;	/* The environment that is bound to the evacuator instance (from cycle start to end) */
+	MM_Scavenger *_controller;		/* The evacuator controller */
+	MM_Evacuator *_evacuator;		/* The evacuator instance that this delegate is bound to (1-1) */
+	bool _isCleared;				/* This is false when gc cycle starts and is set to true after clearing phase completes */
 
 protected:
 public:
@@ -70,8 +70,8 @@ private:
 protected:
 public:
 	/**
-	 * Evacuator calls this when it instantiates the delegate to bind controller-evacuator-delegate. This
-	 * binding persists over the delegate's lifetime.
+	 * Evacuator calls this when it instantiates the delegate to bind evacuator-delegate. This
+	 * binding is 1-1 and invariant and persists for the lifetime of the delegate.
 	 *
 	 * @param evacuator the MM_Evacuator instance to bind delegate to
 	 * @param forge points to system memory allocator
@@ -91,8 +91,17 @@ public:
 	 */
 	void tearDown() { }
 
-	/** This is called from the controller before activating any evacuator instances to allow the
-	 * delegate to set up evacuator flags for the evacuation cycle.
+	/**
+	 * This is called from the controller before activating any evacuator instances to allow the
+	 * delegate to set up evacuator flags in the controller for the evacuation cycle. The return
+	 * value indicates which flags the delegate requires to be set at the start of the gc cycle.
+	 * 
+	 * A static implementation is necessary because this method is called on the master gc thread
+	 * that is bound to the env parameter. At this point no environment is bound to an evacuator,
+	 * and env->getEvacuator() will return NULL or a pointer to an unbound evacuator and should 
+	 * not be used in the implementation of this method.
+	 *
+	 * Delegate flags can also be set/cleared using _controller->setEvacuatorFlag(uintptr_t, bool).
 	 *
 	 * @param env environment for calling thread
 	 * @return preset evacuator flags for the cycle
@@ -100,17 +109,26 @@ public:
 	static uintptr_t prepareForEvacuation(MM_EnvironmentBase *env) { return 0; }
 
 	/**
-	 * Evacuator calls this when it starts starts work in an evacuation cycle. This binds the evacuator
-	 * gc thread (environment) to the evacuator-delegate for the duration of the cycle. This method must
-	 * be implemented in EvacuatorDelegate.cpp, as MM_Evacutor is inaccessible here. The implementation
-	 * must set MM_EvacuatorDelegate::_env to the environment bound to the evacuator at this time.
+	 * Evacuator calls this before it starts work in an evacuation cycle. Implementations may use
+	 * this method to prepare for the start of a generational gc cycle.
+	 * 
+	 * The binding of environment to evacuator-delegate is established at this point. Delegate may 
+	 * access bound environment using _evacuator->getEnvironment. 
 	 */
-	void cycleStart(); /* { _env = evacuator->getEnvironment(); } */
+	void cycleStart(); /* _env = evacuator->getEnvironment(); */
 
+	/**
+	 * Evacuator calls this after it completes work in an evacuation cycle. Implementationsmay use
+	 * this method to finalize their involvement in a generational gc cycle.
+	 * 
+	 * The binding of environment to evacuator-delegate is dissolved after this method completes.
+	 */
 	void cycleEnd() { _env = NULL; }
 
 	/**
-	 * Evacuator calls this to instantiate an object scanner within space provided by objectScannerState
+	 * Evacuator calls this to instantiate an object scanner within space provided by objectScannerState, passing
+	 * a pointer to its bound environment. This is necessary because MM_Evacuator is an incomplete type and this
+	 * method should be inlined for performance.
 	 *
 	 * @param objectptr the object to be scanned
 	 * @param objectScannerState points to space to instantiate the object scanner into
