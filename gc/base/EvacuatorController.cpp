@@ -60,30 +60,19 @@ MM_EvacuatorController::setEvacuatorFlag(uintptr_t flag, bool value)
 }
 
 bool
-MM_EvacuatorController::setAborting(MM_Evacuator *abortingWorker)
+MM_EvacuatorController::setAborting()
 {
-	/* test & set the aborting flag */
-	if (!setEvacuatorFlag(aborting, true)) {
-#if defined(EVACUATOR_DEBUG)
-		if (_debugger.isDebugEnd()) {
-			MM_EnvironmentBase *env = abortingWorker->getEnvironment();
-			OMRPORT_ACCESS_FROM_ENVIRONMENT(env);
-			omrtty_printf("%5lu %2llu %2llu:     abort; ", getEpoch()->gc, getEpoch()->epoch, abortingWorker->getWorkerIndex());
-			printEvacuatorBitmap(env, "stalled", _stalledEvacuatorBitmap);
-			printEvacuatorBitmap(env, "; resuming", _resumingEvacuatorBitmap);
-			printEvacuatorBitmap(env, "; mask", _evacuatorMask);
-			omrtty_printf("; flags:%llx\n", _evacuatorFlags);
-		}
-#endif /* defined(EVACUATOR_DEBUG) */
-	}
-
-	return isAborting();
+	/* test & set the aborting flag, return false if not previously set */
+	return setEvacuatorFlag(aborting, true);
 }
 
 bool
 MM_EvacuatorController::initialize(MM_EnvironmentBase *env)
 {
 	bool result = true;
+
+	/* evacuator model is not instrumented for concurrent scavenger */
+	Assert_MM_true(!_extensions->isEvacuatorEnabled() || !_extensions->isConcurrentScavengerEnabled());
 
 	if (_extensions->isEvacuatorEnabled()) {
 		if (0 != omrthread_monitor_init_with_name(&_controllerMutex, 0, "MM_EvacuatorController::_controllerMutex")) {
@@ -344,7 +333,6 @@ MM_EvacuatorController::unbindWorker(MM_EnvironmentStandard *env)
 	VM_AtomicSupport::addU64(&_finalFlushedBytes, evacuator->getFlushed());
 
 	/* passivate the evacuator instance */
-	evacuator->unbindWorkerThread(env);
 	clearEvacuatorBit(evacuator->getWorkerIndex(), _boundEvacuatorBitmap);
 	if (isEvacuatorBitmapEmpty(_boundEvacuatorBitmap)) {
 		Debug_MM_true(isEvacuatorBitmapEmpty(_stalledEvacuatorBitmap) || isAborting());
@@ -361,7 +349,12 @@ MM_EvacuatorController::unbindWorker(MM_EnvironmentStandard *env)
 		printEvacuatorBitmap(env, "; resuming", _resumingEvacuatorBitmap);
 		omrtty_printf("; flags:%llx\n", _evacuatorFlags);
 	}
+	if (_debugger.isDebugRemembered() && isEvacuatorBitmapEmpty(_boundEvacuatorBitmap)) {
+		evacuator->scanTenureForForgottenObjects();
+	}
 #endif /* defined(EVACUATOR_DEBUG) */
+
+	evacuator->unbindWorkerThread(env);
 }
 
 void
@@ -521,18 +514,19 @@ MM_EvacuatorController::reportProgress(MM_Evacuator *worker,  uint64_t *copied, 
 				_epochTimestamp = currentTimestamp;
 				_history.commit(epoch);
 				omrthread_monitor_exit(_reporterMutex);
-			}
 
 #if defined(EVACUATOR_DEBUG)
-			_debugger.setDebugCycleAndEpoch(epoch->gc, epoch->epoch);
-			if (_debugger.isDebugEpoch() && (_epochTimestamp == currentTimestamp)) {
-				OMRPORT_ACCESS_FROM_ENVIRONMENT(worker->getEnvironment());
-				uint64_t delta = (totalCopied > epoch->scanned) ? (totalCopied - epoch->scanned) : 0;
-				omrtty_printf("%5llu %2llu %2llu:     epoch; %llx %llx %llx %llx %llx %llu %llx %llx\n", epoch->gc, epoch->epoch, worker->getWorkerIndex(),
-						_stalledEvacuatorBitmap, survivorCopied, tenureCopied, epoch->scanned, delta, epoch->duration,
-						epoch->tlhAllocationCeiling, epoch->releaseThreshold);
-			}
+				_debugger.setDebugCycleAndEpoch(epoch->gc, epoch->epoch);
+				if (_debugger.isDebugEpoch() && (_epochTimestamp == currentTimestamp)) {
+					OMRPORT_ACCESS_FROM_ENVIRONMENT(worker->getEnvironment());
+					uint64_t delta = (totalCopied > epoch->scanned) ? (totalCopied - epoch->scanned) : 0;
+					omrtty_printf("%5llu %2llu %2llu:     ", epoch->gc, epoch->epoch, worker->getWorkerIndex());
+					printEvacuatorBitmap(worker->getEnvironment(), "epoch;", _stalledEvacuatorBitmap);
+					omrtty_printf("; %llx %llx %llx %llx %llu %llx %llx\n", survivorCopied, tenureCopied, epoch->scanned, delta, epoch->duration,
+							epoch->tlhAllocationCeiling, epoch->releaseThreshold);
+				}
 #endif /* defined(EVACUATOR_DEBUG) */
+			}
 		}
 	}
 }

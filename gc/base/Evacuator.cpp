@@ -181,12 +181,56 @@ MM_Evacuator::unbindWorkerThread(MM_EnvironmentStandard *env)
 	omrthread_monitor_exit(_mutex);
 }
 
+bool
+MM_Evacuator::isSplitablePointerArray(MM_ForwardedHeader *forwardedHeader, uintptr_t objectSizeInBytes)
+{
+	/* large pointer arrays are split by default but scanners for these objects may inhibit splitting eg when pruning remembered set */
+	return ((MM_EvacuatorBase::min_split_indexable_size < objectSizeInBytes) && _delegate.isIndexablePointerArray(forwardedHeader));
+}
+
+void
+MM_Evacuator::splitPointerArrayWork(omrobjectptr_t pointerArray)
+{
+	uintptr_t elements = 0;
+	_delegate.getIndexableDataBounds(pointerArray, &elements);
+
+	/* distribute elements to segments as evenly as possible and take largest segment first */
+	uintptr_t segments = elements / MM_EvacuatorBase::max_split_segment_elements;
+	if (0 != (elements % MM_EvacuatorBase::max_split_segment_elements)) {
+		segments += 1;
+	}
+	uintptr_t elementsPerSegment = elements / segments;
+	uintptr_t elementsThisSegment = elementsPerSegment + (elements % segments);
+
+	omrthread_monitor_enter(_mutex);
+
+	/* record 1-based array offsets to mark split array work packets */
+	uintptr_t offset = 1;
+	while (0 < segments) {
+		/* add each array segment as a work packet */
+		MM_EvacuatorWorkPacket* work = _freeList.next();
+		work->base = pointerArray;
+		work->offset = offset;
+		work->length = elementsThisSegment;
+		_workList.add(work, &_freeList);
+		offset += elementsThisSegment;
+		elementsThisSegment = elementsPerSegment;
+		segments -= 1;
+	}
+
+	omrthread_monitor_exit(_mutex);
+
+	/* tell the world about it */
+	_controller->notifyOfWork();
+}
+
 omrobjectptr_t
 MM_Evacuator::evacuateRootObject(MM_ForwardedHeader *forwardedHeader)
 {
-	omrobjectptr_t forwardedAddress = forwardedHeader->getForwardedObject();
+	/* failure to evacuate will return original pointer to evacuate region */
+	omrobjectptr_t forwardedAddress = forwardedHeader->isForwardedPointer() ? forwardedHeader->getForwardedObject() : forwardedHeader->getObject();
 
-	if (!isAbortedCycle() && (NULL == forwardedAddress)) {
+	if (!isAbortedCycle() && (isInEvacuate(forwardedAddress))) {
 		/* slot object must be evacuated -- determine before and after object size */
 		uintptr_t slotObjectSizeAfterCopy = 0, slotObjectSizeBeforeCopy = 0, hotFieldAlignmentDescriptor = 0;
 		_objectModel->calculateObjectDetailsForCopy(_env, forwardedHeader, &slotObjectSizeBeforeCopy, &slotObjectSizeAfterCopy, &hotFieldAlignmentDescriptor);
@@ -194,37 +238,43 @@ MM_Evacuator::evacuateRootObject(MM_ForwardedHeader *forwardedHeader)
 		/* reserve space for object in outside copyspace or abort */
 		uintptr_t objectAge = _objectModel->getPreservedAge(forwardedHeader);
 		EvacuationRegion evacuationRegion = isNurseryAge(objectAge) ? survivor : tenure;
-		MM_EvacuatorCopyspace *effectiveCopyspace = reserveOutsideCopyspace(&evacuationRegion, slotObjectSizeAfterCopy);
+		bool isSplitable = isSplitablePointerArray(forwardedHeader, slotObjectSizeAfterCopy);
+		MM_EvacuatorCopyspace *effectiveCopyspace = reserveOutsideCopyspace(&evacuationRegion, slotObjectSizeAfterCopy, isSplitable);
 
 		/* copy object to outside copyspace */
 		if (NULL != effectiveCopyspace) {
 			omrobjectptr_t copyHead = (omrobjectptr_t)effectiveCopyspace->getCopyHead();
 			forwardedAddress = copyForward(forwardedHeader, (fomrobject_t *)NULL, effectiveCopyspace, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy);
 			if (copyHead == forwardedAddress) {
-				Debug_MM_true((effectiveCopyspace != &_largeCopyspace) || ((slotObjectSizeAfterCopy == _largeCopyspace.getWorkSize()) && (0 == _largeCopyspace.getWhiteSize())));
-				/* object copied to effective copyspace -- see if we can release a work packet */
-				if ((effectiveCopyspace == &_largeCopyspace) || (effectiveCopyspace->getWorkSize() >= _workReleaseThreshold)) {
-					/* always release work from large object copyspace immediately as solo object work packet */
+				if (effectiveCopyspace == &_largeCopyspace) {
+					Debug_MM_true((slotObjectSizeAfterCopy == effectiveCopyspace->getWorkSize()) && (0 == effectiveCopyspace->getWhiteSize()));
+					if (isSplitable) {
+						/* record 1-based array offsets to mark split array work packets */
+						splitPointerArrayWork(copyHead);
+					} else {
+						/* set up work packet contained a single large scalar or non-splitable array object */
+						MM_EvacuatorWorkPacket *work = _freeList.next();
+						work->base = (omrobjectptr_t)effectiveCopyspace->rebase(&work->length);
+						addWork(work);
+					}
+					/* prepare the large object copyspace for next use */
+					_largeCopyspace.resetCopyspace();
+				} else if (effectiveCopyspace->getWorkSize() >= _workReleaseThreshold) {
+					/* strip work from head of effective copyspace into a work packet, leaving only trailing whitespace in copyspace */
 					MM_EvacuatorWorkPacket *work = _freeList.next();
-					/* latch the space between base and copy head into a work packet and rebase copyspace at current copy head */
 					work->base = (omrobjectptr_t)effectiveCopyspace->rebase(&work->length);
-					/* add work packet to worklist */
 					addWork(work);
 				}
-				/* update evacuator progress for epoch reporting */
-				if ((_copiedBytesDelta[survivor] + _copiedBytesDelta[tenure]) >= _copiedBytesReportingDelta) {
-					_controller->reportProgress(this, _copiedBytesDelta, &_scannedBytesDelta);
-				}
-
-			} else {
+			} else if (effectiveCopyspace == &_largeCopyspace) {
 				/* object copied by other thread */
-				if (effectiveCopyspace == &_largeCopyspace) {
-					_whiteList[evacuationRegion].add(_largeCopyspace.trim());
-				}
+				_whiteList[evacuationRegion].add(_largeCopyspace.trim());
+				/* prepare the large object copyspace for next use */
+				_largeCopyspace.resetCopyspace();
 			}
 		}
 	}
 
+	Debug_MM_true(isInSurvivor(forwardedAddress) || isInTenure(forwardedAddress) || (isAbortedCycle() && (forwardedAddress == forwardedHeader->getObject())));
 	return forwardedAddress;
 }
 
@@ -236,39 +286,83 @@ MM_Evacuator::evacuateRootObject(volatile omrobjectptr_t *slotPtr)
 		/* slot object must be evacuated -- determine before and after object size */
 		MM_ForwardedHeader forwardedHeader(object);
 		object = evacuateRootObject(&forwardedHeader);
-		if (NULL != object) {
-			*slotPtr = object;
-		}
+		Debug_MM_true(NULL != object);
+		*slotPtr = object;
 	}
-	/* failure to evacuate must be reported as object in survivor space */
-	return isInSurvivor(*slotPtr) || isInEvacuate(*slotPtr);
+	/* failure to evacuate must be reported as object in survivor space to maintain remembered set integrity */
+	return isInSurvivor(object) || isInEvacuate(object);
 }
 
 bool
 MM_Evacuator::evacuateRootObject(GC_SlotObject* slotObject)
 {
 	omrobjectptr_t object = slotObject->readReferenceFromSlot();
-	bool copiedToNewSpace = evacuateRootObject((volatile omrobjectptr_t *)&object);
-	slotObject->writeReferenceToSlot(object);
-	return copiedToNewSpace;
+	if (isInEvacuate(object)) {
+		/* slot object must be evacuated -- determine before and after object size */
+		MM_ForwardedHeader forwardedHeader(object);
+		object = evacuateRootObject(&forwardedHeader);
+		Debug_MM_true(NULL != object);
+		slotObject->writeReferenceToSlot(object);
+	}
+	/* failure to evacuate must be reported as object in survivor space to maintain remembered set integrity */
+	return isInSurvivor(object) || isInEvacuate(object);
+}
+
+bool
+MM_Evacuator::evacuateRememberedObject(omrobjectptr_t objectptr)
+{
+#if defined(EVACUATOR_DEBUG)
+	_delegate.debugValidateObject(objectptr);
+#endif /* defined(EVACUATOR_DEBUG) */
+	Debug_MM_true((NULL != objectptr) && isInTenure(objectptr));
+	Debug_MM_true(_objectModel->getRememberedBits(objectptr) < (uintptr_t)0xc0);
+
+	/* TODO: allow array splitting when implemented for evacuator */
+	bool rememberObject = false;
+	GC_ObjectScannerState objectScannerState;
+	GC_ObjectScanner *objectScanner = _delegate.getObjectScanner(objectptr, &objectScannerState, GC_ObjectScanner::scanRoots | GC_ObjectScanner::indexableObjectNoSplit);
+	if (NULL != objectScanner) {
+		GC_SlotObject *slotPtr;
+		while (NULL != (slotPtr = objectScanner->getNextSlot())) {
+			if (evacuateRootObject(slotPtr)) {
+				rememberObject = true;
+			}
+		}
+	}
+
+	/* the remembered state of the object may also depends on its indirectly related objects */
+	if (_objectModel->hasIndirectObjectReferents((CLI_THREAD_TYPE*)_env->getLanguageVMThread(), objectptr)) {
+		if (_delegate.scanIndirectObjects(objectptr)) {
+			rememberObject = true;
+		}
+	}
+
+	return rememberObject;
 }
 
 void
 MM_Evacuator::evacuateThreadSlot(volatile omrobjectptr_t *objectPtrIndirect)
 {
-	omrobjectptr_t objectPtr = *objectPtrIndirect;
-	if (NULL != objectPtr) {
-		/* auto-remember stack- and thread-referenced objects */
-		if (isInEvacuate(objectPtr)) {
-			if (!evacuateRootObject(objectPtrIndirect) && !_env->getExtensions()->isConcurrentScavengerEnabled()) {
-				Trc_MM_ParallelScavenger_copyAndForwardThreadSlot_deferRememberObject(_env->getLanguageVMThread(), *objectPtrIndirect);
-				/* the object was tenured while it was referenced from the stack. Undo the forward, and process it in the rescan pass. */
-				_controller->setEvacuatorFlag(MM_EvacuatorController::rescanThreadSlots, true);
-				*objectPtrIndirect = objectPtr;
-			}
-		} else if (!_env->getExtensions()->isConcurrentScavengerEnabled() && isInTenure(objectPtr)) {
-			if (_env->getExtensions()->objectModel.atomicSwitchReferencedState(objectPtr, OMR_TENURED_STACK_OBJECT_RECENTLY_REFERENCED, OMR_TENURED_STACK_OBJECT_CURRENTLY_REFERENCED)) {
-				Trc_MM_ParallelScavenger_copyAndForwardThreadSlot_renewingRememberedObject(_env->getLanguageVMThread(), objectPtr, OMR_TENURED_STACK_OBJECT_RECENTLY_REFERENCED);
+	if (!_env->getExtensions()->isConcurrentScavengerEnabled()) {
+		omrobjectptr_t objectPtr = *objectPtrIndirect;
+		if (NULL != objectPtr) {
+			/* auto-remember stack- and thread-referenced objects */
+			if (isInEvacuate(objectPtr)) {
+				if (!evacuateRootObject(objectPtrIndirect)) {
+					Debug_MM_true(isInTenure(*objectPtrIndirect));
+					Trc_MM_ParallelScavenger_copyAndForwardThreadSlot_deferRememberObject(_env->getLanguageVMThread(), *objectPtrIndirect);
+					/* the object was tenured while it was referenced from the stack. Undo the forward, and process it in the rescan pass. */
+					_controller->setEvacuatorFlag(MM_EvacuatorController::rescanThreadSlots, true);
+					*objectPtrIndirect = objectPtr;
+				}
+			} else if (isInTenure(objectPtr)) {
+				Debug_MM_true(_objectModel->getRememberedBits(objectPtr) < (uintptr_t)0xc0);
+				if (_objectModel->atomicSwitchReferencedState(objectPtr, OMR_TENURED_STACK_OBJECT_RECENTLY_REFERENCED, OMR_TENURED_STACK_OBJECT_CURRENTLY_REFERENCED)) {
+					Trc_MM_ParallelScavenger_copyAndForwardThreadSlot_renewingRememberedObject(_env->getLanguageVMThread(), objectPtr, OMR_TENURED_STACK_OBJECT_RECENTLY_REFERENCED);
+				}
+				Debug_MM_true(_objectModel->getRememberedBits(objectPtr) < (uintptr_t)0xc0);
+			} else {
+				Debug_MM_true(isInSurvivor(objectPtr));
 			}
 		}
 	}
@@ -301,6 +395,18 @@ MM_Evacuator::evacuateHeap()
 	scanHeap();
 
 	return !isAbortedCycle();
+}
+
+bool
+MM_Evacuator::setAbortedCycle()
+{
+	/* assume controller doesn't know that the cycle is aborting */
+	bool isIdempotent = true;
+	if (!_abortedCycle) {
+		isIdempotent = _controller->setAborting();
+		_abortedCycle = true;
+	}
+	return isIdempotent;
 }
 
 bool
@@ -351,20 +457,21 @@ MM_Evacuator::workThreadGarbageCollect(MM_EnvironmentStandard *env)
 	Debug_MM_true(_env == env);
 	Debug_MM_true(_env->getEvacuator() == this);
 	Debug_MM_true(_controller->isBoundEvacuator(_workerIndex));
+	Debug_MM_true(NULL == _stackWhitespace);
 
 	/* reserve space for scan stack and set pointers to stack bounds  */
 	_stackLimit = isBreadthFirst() ? (_stackBottom + 1) : _stackCeiling;
 	for (_scanStackFrame = _stackBottom; _scanStackFrame < _stackCeiling; _scanStackFrame += 1) {
 		_scanStackFrame->resetScanspace();
 	}
-	_scanStackFrame = _peakStackFrame = NULL;
+	_scanStackFrame = NULL;
 
 	/* scan roots and remembered set and objects depending from these */
 	scanRemembered();
 	scanRoots();
 	scanHeap();
 
-	/* trick to obviate a read barrier -- objects tenured this cycle are always remebwered */
+	/* trick to obviate a write barrier -- objects tenured this cycle are always remembered */
 	if (!isAbortedCycle() && _controller->isEvacuatorFlagSet(MM_EvacuatorController::rescanThreadSlots)) {
 		_delegate.rescanThreadSlots();
 		flushRememberedSet();
@@ -381,13 +488,12 @@ MM_Evacuator::workThreadGarbageCollect(MM_EnvironmentStandard *env)
 	_delegate.flushForEndCycle();
 
 	/* clear whitespace from the last active frame */
-	if (NULL != _peakStackFrame) {
-		_whiteList[survivor].add(_peakStackFrame->clip());
-		_peakStackFrame->resetScanspace();
-		_peakStackFrame = NULL;
+	if (NULL != _stackWhitespace) {
+		MM_EvacuatorWhitespace *whitespace = _stackWhitespace->clip();
+		_whiteList[getEvacuationRegion(whitespace)].add(whitespace);
+		_stackWhitespace->resetScanspace();
+		_stackWhitespace = NULL;
 	}
-	/* large survivor whitespace fragments on the whitelist may be recycled back into the memory pool */
-	flushWhitespace(survivor);
 
 	/* release unused whitespace from outside copyspaces */
 	for (intptr_t space = (intptr_t)survivor; space <= (intptr_t)tenure; space += 1) {
@@ -397,51 +503,32 @@ MM_Evacuator::workThreadGarbageCollect(MM_EnvironmentStandard *env)
 		_whiteList[space].add(whitespace);
 	}
 
+#if defined(EVACUATOR_DEBUG)
+	_whiteList[survivor].verify();
+	_whiteList[tenure].verify();
+#endif /* defined(EVACUATOR_DEBUG) */
+
 	/* reset large copyspace (it is void of work and whitespace at this point) */
 	Debug_MM_true(0 == _largeCopyspace.getWorkSize());
 	Debug_MM_true(0 == _largeCopyspace.getWhiteSize());
 	_largeCopyspace.resetCopyspace();
 
+	/* large survivor whitespace fragments on the whitelist may be recycled back into the memory pool */
+	flushWhitespace(survivor);
+
+	/* tenure whitespace is retained between completed nursery collections */
+	Debug_MM_true(0 == _env->_scavengerRememberedSet.count);
 	if (!isAbortedCycle()) {
-		/* prune remembered set */
+		/* prune remembered set to complete cycle */
 		_controller->pruneRememberedSet(_env);
 		Debug_MM_true(0 == getVolumeOfWork());
 	} else {
 		/* flush tenure whitelist before backout */
-		_whiteList[tenure].flush();
-		/* back out evacuation */
+		flushWhitespace(tenure);
+		/* set backout flag to abort cycle */
 		_controller->setBackOutFlag(_env, backOutFlagRaised);
 		_controller->completeBackOut(_env);
 	}
-}
-
-bool
-MM_Evacuator::evacuateRememberedObjectReferents(omrobjectptr_t objectptr)
-{
-	Debug_MM_true((NULL != objectptr) && isInTenure(objectptr));
-
-	/* TODO: allow array splitting when implemented for evacuator */
-	bool rememberObject = false;
-	GC_ObjectScannerState objectScannerState;
-	uintptr_t scannerFlags = GC_ObjectScanner::scanRoots | GC_ObjectScanner::indexableObjectNoSplit;
-	GC_ObjectScanner *objectScanner = getObjectScanner(objectptr, &objectScannerState, scannerFlags);
-	if (NULL != objectScanner) {
-		GC_SlotObject *slotPtr;
-		while (NULL != (slotPtr = objectScanner->getNextSlot())) {
-			if (evacuateRootObject(slotPtr)) {
-				rememberObject = true;
-			}
-		}
-	}
-
-	/* The remembered state of a class object also depends on the class statics */
-	if (_env->getExtensions()->objectModel.hasIndirectObjectReferents((CLI_THREAD_TYPE*)_env->getLanguageVMThread(), objectptr)) {
-		if (_delegate.scanIndirectObjects(objectptr)) {
-			rememberObject = true;
-		}
-	}
-
-	return rememberObject;
 }
 
 void
@@ -473,8 +560,10 @@ MM_Evacuator::scanRemembered()
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 
+	/* flush locally buffered remembered objects to aggregated list */
 	_env->flushRememberedSet();
 
+	/* scan aggregated remembered objects concurrently with other evacuators */
 	_controller->scavengeRememberedSet(_env);
 }
 
@@ -490,6 +579,7 @@ MM_Evacuator::scanClearable()
 		omrtty_printf("; flags:%llx; vow:%llx\n", _controller->sampleEvacuatorFlags(), getVolumeOfWork());
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
+
 	/* if there are more root or other unreachable objects to be evacuated they can be copied and forwarded here */
 	_delegate.scanClearable();
 
@@ -510,51 +600,21 @@ MM_Evacuator::scanHeap()
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 
-	/* mark start of scan cycle */
+	/* mark start of scan cycle -- this will be set after this evacuator receives controller's end of scan signal */
 	_completedScan = false;
 
 	/* try to find some some work to prime the scan stack */
 	MM_EvacuatorWorkPacket *work = loadWork();
 
 	while (NULL != work) {
-		/* push found work to prime the stack */
+		/* push found work onto bottom stack frame */
 		push(work);
-		debugStack(" load");
 
-		/* burn stack down until empty or gc cycle is aborted */
-		while (NULL != _scanStackFrame) {
-			/* scan and copy inside top stack frame until scan head == copy head or copy head >= limit at next page boundary */
-			EvacuationRegion evacuationRegion = unreachable;
-			uintptr_t slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy;
-			GC_SlotObject *slotObject = copyInside(&slotObjectSizeBeforeCopy, &slotObjectSizeAfterCopy, &evacuationRegion);
-			if (NULL != slotObject) {
-				/* referents that can't be copied inside current frame are pushed up the stack or flushed to outside copyspace */
-				if (reserveInsideCopyspace(slotObjectSizeAfterCopy)) {
-					/* push slot object up to next stack frame */
-					push(slotObject, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy);
-					debugStack(" push");
-				} else {
-					/* no stack whitespace so flush current stack frame to outside copyspace and pop */
-					debugStack("flush", true);
-					flush(slotObject);
-				}
-			} else {
-				/* current stack frame has been completely scanned so pop */
-				pop();
-				debugStack("pop");
-			}
-		}
+		/* burn down stack until empty or gc cycle is aborted */
+		scan();
 
 		/* load more work until scanning is complete or cycle aborted */
 		work = loadWork();
-	}
-
-	/* drive stack to empty without scanning frames if aborting */
-	if (isAbortedCycle()) {
-		/* this leaves remaining whitespace bound to _peakStackFrame */
-		while (_scanStackFrame >= _stackBottom) {
-			pop();
-		}
 	}
 
 	Debug_MM_true(_completedScan);
@@ -563,46 +623,21 @@ MM_Evacuator::scanHeap()
 void
 MM_Evacuator::scanComplete()
 {
+#if defined(EVACUATOR_DEBUG)
 	if (!isAbortedCycle()) {
 		for (MM_EvacuatorScanspace *stackFrame = _stackBottom; stackFrame < _stackCeiling; stackFrame += 1) {
 			Debug_MM_true(0 == stackFrame->getUnscannedSize());
-			Debug_MM_true(0 == stackFrame->getWhiteSize());
+			Debug_MM_true(0 == stackFrame->getWhiteSize() || (stackFrame == _stackWhitespace));
 		}
 		Debug_MM_true(NULL == _scanStackFrame);
 		Debug_MM_true(0 == _copyspace[survivor].getWorkSize());
 		Debug_MM_true(0 == _copyspace[tenure].getWorkSize());
 	}
-
-	/* reset stack  */
-	_stackLimit = isBreadthFirst() ? (_stackBottom + 1) : _stackCeiling;
-	_scanStackFrame = NULL;
-	_peakStackFrame = NULL;
+	Debug_MM_true(!_completedScan);
+#endif /* defined(EVACUATOR_DEBUG) */
 
 	/* all done heap scan */
-	Debug_MM_true(!_completedScan);
 	_completedScan = true;
-}
-
-bool
-MM_Evacuator::isSplitablePointerArray(GC_SlotObject *slotObject, uintptr_t objectSizeInBytes)
-{
-	/* large pointer arrays are split by default but scanners for these objects may inhibit splitting eg when pruning remembered set */
-	bool isSplitable = (MM_EvacuatorBase::min_split_indexable_size < objectSizeInBytes);
-
-	/* TODO: split remembered set pointer arrays */
-	if (isSplitable){
-		MM_ForwardedHeader forwardedHeader(slotObject->readReferenceFromSlot());
-		isSplitable &= _delegate.isIndexablePointerArray(&forwardedHeader);
-	}
-
-	/* scan work is split into work packets when the array is copied and determines how many evacuators may participate in scanning */
-	return isSplitable;
-}
-
- GC_ObjectScanner *
-MM_Evacuator::getObjectScanner(omrobjectptr_t objectPtr, GC_ObjectScannerState *scannerSpace, uintptr_t flags)
-{
-	return _delegate.getObjectScanner(objectPtr, scannerSpace, flags);
 }
 
 GC_ObjectScanner *
@@ -610,20 +645,24 @@ MM_Evacuator::nextObjectScanner(MM_EvacuatorScanspace *scanspace, bool finalizeO
 {
 	uintptr_t scannedBytes = 0;
 
-	/* finalize object scan for current object scanner, if any */
-	GC_ObjectScanner *objectScanner = scanspace->getObjectScanner();
+	/* get current object scanner, if any */
+	GC_ObjectScanner *objectScanner = scanspace->getActiveObjectScanner();
+
+	/* object scanner is finalized after it returns its last slot */
 	if (finalizeObjectScan && (NULL != objectScanner)) {
 		/* advance scan head past parent object or split array segment */
-		scannedBytes = _objectModel->getConsumedSizeInBytesWithHeader(objectScanner->getParentObject());
 		if (scanspace->isSplitArraySegment()) {
-			/* indexable object header and trailing remainder scanned bytes are counted with first array segment scanned */
+			scannedBytes = _splitArrayBytesToScan;
 			if (objectScanner->isHeadObjectScanner()) {
-				scannedBytes = _splitArrayBytesToScan + (scannedBytes - ((GC_IndexableObjectScanner *)objectScanner)->getDataSizeInBytes());
-			} else {
-				scannedBytes = _splitArrayBytesToScan;
+				/* indexable object header and trailing remainder scanned bytes are counted with first array segment scanned */
+				scannedBytes += (_objectModel->getConsumedSizeInBytesWithHeader(objectScanner->getParentObject()) - ((GC_IndexableObjectScanner *)objectScanner)->getDataSizeInBytes());
 			}
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 			_stats->countWorkPacketSize(scannedBytes, _controller->_maximumWorkspaceSize);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 			_splitArrayBytesToScan = 0;
+		} else {
+			scannedBytes = _objectModel->getConsumedSizeInBytesWithHeader(objectScanner->getParentObject());
 		}
 
 		/* update remembered state for parent object */
@@ -635,17 +674,23 @@ MM_Evacuator::nextObjectScanner(MM_EvacuatorScanspace *scanspace, bool finalizeO
 		/* move scan head over scanned object and drop its object scanner */
 		objectScanner = scanspace->advanceScanHead(scannedBytes);
 		_scannedBytesDelta += scannedBytes;
+		
+		/* active object scanner was NULLed in advanceScanHead() */
+		Debug_MM_true((NULL == objectScanner) && (objectScanner == scanspace->getActiveObjectScanner()));
 	}
 
 	/* advance scan head over leaf objects and objects with no scanner to set up next object scanner */
 	while ((NULL == objectScanner) && (scanspace->getScanHead() < scanspace->getCopyHead())) {
 		omrobjectptr_t objectPtr = (omrobjectptr_t)scanspace->getScanHead();
-		objectScanner = getObjectScanner(objectPtr, scanspace->getObjectScannerState(), GC_ObjectScanner::scanHeap);
+		objectScanner = _delegate.getObjectScanner(objectPtr, scanspace->getObjectScannerState(), GC_ObjectScanner::scanHeap);
 		if ((NULL == objectScanner) || objectScanner->isLeafObject()) {
 			/* nothing to scan for object at scan head, drop object scanner and advance scan head to next object in scanspace */
 			scannedBytes = _objectModel->getConsumedSizeInBytesWithHeader(objectPtr);
 			objectScanner = scanspace->advanceScanHead(scannedBytes);
 			_scannedBytesDelta += scannedBytes;
+			
+			/* active object scanner was NULLed in advanceScanHead() */
+			Debug_MM_true((NULL == objectScanner) && (objectScanner == scanspace->getActiveObjectScanner()));
 		}
 	}
 
@@ -663,13 +708,23 @@ MM_Evacuator::push(MM_EvacuatorWorkPacket *work)
 	Debug_MM_true(NULL != work);
 	Debug_MM_true(0 < work->length);
 	Debug_MM_true(NULL != work->base);
-	Debug_MM_true(NULL == _peakStackFrame);
 	Debug_MM_true(NULL == _scanStackFrame);
 
 	/* reset and adjust stack bounds and prepare stack to receive work packet in bottom frame */
 	_stackLimit = (!_controller->areAnyEvacuatorsStalled() && !isBreadthFirst()) ? _stackCeiling : (_stackBottom + 1);
-	_scanStackRegion = isInSurvivor(work->base) ? survivor : tenure;
-	_scanStackFrame = _peakStackFrame = _stackBottom;
+	_scanStackFrame = _stackBottom;
+
+	/* set up the stack for scanning in work packet region */
+	EvacuationRegion workRegion = isInSurvivor(work->base) ? survivor : tenure;
+	if ((workRegion != _scanStackRegion) || (NULL == _stackWhitespace)) {
+		if (NULL != _stackWhitespace) {
+			/* clip any remainder stack whitespace onto the previous scanning region's whitelist */
+			_whiteList[_scanStackRegion].add(_stackWhitespace->clip());
+		}
+		/* this will force a new reservation of stack whitespace on first push */
+		_stackWhitespace = _scanStackFrame;
+	}
+	_scanStackRegion = workRegion;
 
 	if (isSplitArrayPacket(work)) {
 		GC_IndexableObjectScanner *scanner = (GC_IndexableObjectScanner *)_scanStackFrame->getObjectScannerState();
@@ -680,7 +735,9 @@ MM_Evacuator::push(MM_EvacuatorWorkPacket *work)
 		/* split array segments are scanned only on the bottom frame of the stack -- save the length of segment for updating _scannedBytes when this segment has been scanned */
 		_splitArrayBytesToScan = sizeof(fomrobject_t) * work->length;
 	} else {
+#if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 		_stats->countWorkPacketSize(work->length, _controller->_maximumWorkspaceSize);
+#endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 		/* the work packet contains a contiguous series of objects -- set scanspace base = scan, copy = limit = end = scan + length */
 		_scanStackFrame->setScanspace((uint8_t *)work->base, (uint8_t *)work->base + work->length, work->length, _maxInsideCopySize);
 		/* object scanners will be instantiated and _scannedBytes updated as objects in scanspace are scanned */
@@ -697,19 +754,50 @@ MM_Evacuator::push(MM_EvacuatorWorkPacket *work)
 		omrtty_printf("\n");
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
+	debugStack(" load");
 
 	_freeList.add(work);
 }
 
 void
+MM_Evacuator::scan()
+{
+	/* burn down stack until empty or gc cycle is aborted */
+	while (NULL != _scanStackFrame) {
+		/* scan and copy inside top stack frame until scan head == copy head or copy head >= limit at next page boundary */
+		EvacuationRegion evacuationRegion = unreachable;
+		uintptr_t slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy;
+		GC_SlotObject* slotObject = copyInside(&slotObjectSizeBeforeCopy, &slotObjectSizeAfterCopy, &evacuationRegion);
+		if (NULL != slotObject) {
+			/* referents that can't be copied inside current frame are pushed up the stack or flushed to outside copyspace */
+			if (reserveInsideCopyspace(slotObjectSizeAfterCopy)) {
+				/* push slot object up to next stack frame */
+				push(slotObject, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy);
+				debugStack(" push");
+			} else {
+				/* no stack whitespace so flush current stack frame to outside copyspace and pop */
+				debugStack("flush", true);
+				flush(slotObject);
+			}
+		} else {
+			/* current stack frame has been completely scanned so pop */
+			pop();
+			debugStack("pop");
+		}
+	}
+}
+
+void
 MM_Evacuator::push(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy)
 {
-	/* copy and forward slot object inside peak frame -- this cannot change remembered state of parent so ignore returned pointer */
-	copyForward(slotObject, _peakStackFrame, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy);
+	Debug_MM_true(_scanStackRegion == getEvacuationRegion(_stackWhitespace->getCopyHead()));
 
-	if (_peakStackFrame->getScanHead() < _peakStackFrame->getCopyHead()) {
+	/* copy and forward slot object inside peak frame -- this cannot change remembered state of parent so ignore returned pointer */
+	copyForward(slotObject, _stackWhitespace, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy);
+
+	if (_stackWhitespace->getScanHead() < _stackWhitespace->getCopyHead()) {
 		/* object was evacuated in this copy/forward so consider it pushed */
-		_scanStackFrame = _peakStackFrame;
+		_scanStackFrame = _stackWhitespace;
 	}
 
 	Debug_MM_true(_scanStackFrame < _stackLimit);
@@ -718,28 +806,16 @@ MM_Evacuator::push(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy
 void
 MM_Evacuator::pop()
 {
-	/* pop the stack */
+	Debug_MM_true((_stackBottom <= _scanStackFrame) && (_scanStackFrame < _stackCeiling));
+	Debug_MM_true((0 == _scanStackFrame->getWhiteSize()) || (_scanStackFrame == _stackWhitespace));
+	Debug_MM_true((0 == _scanStackFrame->getUnscannedSize()) || isAbortedCycle());
+
 	if (_stackBottom < _scanStackFrame) {
-		if (isAbortedCycle()) {
-			/* clear stack frame if aborting cycle */
-			_whiteList[_scanStackRegion].add(_scanStackFrame->clip());
-			if (NULL != _peakStackFrame) {
-				_scanStackFrame->resetScanspace();
-				_peakStackFrame = NULL;
-			}
-		}
+		/* pop to previous frame */
 		_scanStackFrame -= 1;
 	} else {
-		Debug_MM_true(_stackBottom == _scanStackFrame);
-		/* stack empty -- recycle any whitespace remaining in peak or bottom stack frame */
-		if (NULL != _peakStackFrame) {
-			_whiteList[_scanStackRegion].add(_peakStackFrame->clip());
-			_peakStackFrame->resetScanspace();
-		} else {
-			_whiteList[_scanStackRegion].add(_scanStackFrame->clip());
-		}
-		/* clear the stack */
-		_scanStackFrame = _peakStackFrame = NULL;
+		/* pop to empty stack leaving stack whitespace in _stackWhitespace */
+		_scanStackFrame = NULL;
 	}
 }
 
@@ -748,38 +824,36 @@ MM_Evacuator::flush(GC_SlotObject *slotObject)
 {
 	GC_ObjectScanner *objectScanner = nextObjectScanner(_scanStackFrame, false);
 	do {
+		/* evacuate slot object if it is in evacuate space */
 		if (NULL != slotObject) {
-			/* check whether slot is in evacuate space */
 			omrobjectptr_t object = slotObject->readReferenceFromSlot();
 			if (isInEvacuate(object)) {
 				/* slot object must be evacuated */
 				uintptr_t slotObjectSizeBeforeCopy = 0;
 				uintptr_t slotObjectSizeAfterCopy = 0;
 				uintptr_t hotFieldAlignmentDescriptor = 0;
+
 				MM_ForwardedHeader forwardedHeader(object);
 				if (!forwardedHeader.isForwardedPointer()) {
-					uintptr_t objectAge = _objectModel->getPreservedAge(&forwardedHeader);
-					EvacuationRegion evacuationRegion = isNurseryAge(objectAge) ? survivor : tenure;
-					_objectModel->calculateObjectDetailsForCopy(_env, &forwardedHeader, &slotObjectSizeBeforeCopy, &slotObjectSizeAfterCopy, &hotFieldAlignmentDescriptor);
-
 					/* copy slot object to outside copyspace */
-					copyOutside(slotObject, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy, evacuationRegion);
+					EvacuationRegion evacuationRegion = isNurseryAge(_objectModel->getPreservedAge(&forwardedHeader)) ? survivor : tenure;
+					_objectModel->calculateObjectDetailsForCopy(_env, &forwardedHeader, &slotObjectSizeBeforeCopy, &slotObjectSizeAfterCopy, &hotFieldAlignmentDescriptor);
+					object = copyOutside(&forwardedHeader, slotObject->readAddressFromSlot(), slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy, evacuationRegion);
 				} else {
-					/* slot object already evacuated -- just update slot */
-					slotObject->writeReferenceToSlot(forwardedHeader.getForwardedObject());
+					/* get the forwarding address */
+					object = forwardedHeader.getForwardedObject();
 				}
+
+				/* update slot with forwarding address */
+				slotObject->writeReferenceToSlot(object);
 			}
+
 			if (tenure == _scanStackRegion) {
-				object = slotObject->readReferenceFromSlot();
-				_scanStackFrame->updateRememberedState(isInSurvivor(object));
+				_scanStackFrame->updateRememberedState(isInSurvivor(object) || isInEvacuate(object));
 				Debug_MM_true(!isInEvacuate(object) || isAbortedCycle());
 			}
 		}
 		
-		if (setStackLimit()) {
-			return;
-		}
-
 		/* get scanner for next object in frame and find first slot */
 		slotObject = objectScanner->getNextSlot();
 		while ((NULL == slotObject) && (NULL != objectScanner)) {
@@ -788,6 +862,11 @@ MM_Evacuator::flush(GC_SlotObject *slotObject)
 			if (NULL != objectScanner) {
 				slotObject = objectScanner->getNextSlot();
 			}
+		}
+
+		/* if stall condition cleared resume copying inside this frame */
+		if (setStackLimit()) {
+			return;
 		}
 	} while (NULL != objectScanner);
 
@@ -809,6 +888,10 @@ MM_Evacuator::setStackLimit()
 		
 			/* limit stack to force flushing until stalled evacuator condition clears */
 			_stackLimit = _stackBottom + 1;
+
+			/* continue copying inside stack until a slot must be pushed then flush() until stall clears */
+			return false;
+
 		} else if (!areAnyEvacuatorsStalled && (_stackLimit < _stackCeiling)) {
 			/* recalculate work release threshold to reflect worklist volume after stall condition clears */
 			_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(getVolumeOfWork());
@@ -829,7 +912,7 @@ MM_Evacuator::copyInside(uintptr_t *slotObjectSizeBeforeCopy, uintptr_t *slotObj
 {
 	MM_EvacuatorScanspace * const stackFrame = _scanStackFrame;
 	GC_ObjectScanner *objectScanner = nextObjectScanner(_scanStackFrame, false);
-	while (!isAbortedCycle() && (NULL != objectScanner)) {
+	while (NULL != objectScanner) {
 		Debug_MM_true((objectScanner->getParentObject() == (omrobjectptr_t)stackFrame->getScanHead()) || (stackFrame->isSplitArraySegment() && (objectScanner->getParentObject() == (omrobjectptr_t)stackFrame->getBase())));
 
 		/* loop through reference slots in current object at scan head */
@@ -837,46 +920,44 @@ MM_Evacuator::copyInside(uintptr_t *slotObjectSizeBeforeCopy, uintptr_t *slotObj
 		while (NULL != slotObject) {
 			omrobjectptr_t object = slotObject->readReferenceFromSlot();
 			if (isInEvacuate(object)) {
+				/* copy and forward the slot object */
 				MM_ForwardedHeader forwardedHeader(object);
 				if (!forwardedHeader.isForwardedPointer()) {
-					uintptr_t hotFieldAlignmentDescriptor = 0;
 					/* slot object must be evacuated -- determine before and after object size */
+					uintptr_t hotFieldAlignmentDescriptor = 0;
 					_objectModel->calculateObjectDetailsForCopy(_env, &forwardedHeader, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy, &hotFieldAlignmentDescriptor);
-
-					/* copy and forward the slot object */
-					uintptr_t objectAge = _objectModel->getPreservedAge(&forwardedHeader);
-					*evacuationRegion = isNurseryAge(objectAge) ? survivor : tenure;
+					*evacuationRegion = isNurseryAge(_objectModel->getPreservedAge(&forwardedHeader)) ? survivor : tenure;
 					if ((_scanStackRegion == *evacuationRegion) && (_maxInsideCopySize >= *slotObjectSizeAfterCopy)) {
-						/* copy inside this stack frame copy head has not passed frame limit, otherwise push */
-						uintptr_t stackRemainder = stackFrame->getWhiteSize();
-						if ((stackFrame->getCopyHead() < stackFrame->getCopyLimit()) && (stackRemainder >= *slotObjectSizeAfterCopy)) {
-							/* copy small slot object inside this stack frame and update the reference slot with forwarding address */
+						/* copy inside this stack frame if copy head has not passed frame limit, otherwise push */
+						if ((stackFrame->getCopyHead() < stackFrame->getCopyLimit()) && (stackFrame->getWhiteSize() >= *slotObjectSizeAfterCopy)) {
+							/* copy small slot object inside this stack frame and update object pointer with forwarding address */
 							object = copyForward(&forwardedHeader, slotObject->readAddressFromSlot(), stackFrame, *slotObjectSizeBeforeCopy, *slotObjectSizeAfterCopy);
-							slotObject->writeReferenceToSlot(object);
-						} else if ((stackRemainder >= *slotObjectSizeAfterCopy) || (stackRemainder < MM_EvacuatorBase::max_scanspace_remainder) || objectScanner->isIndexableObject()) {
-							/* push small slot object up the scan stack if there is sufficient stack whitespace remaining or trailing whitespace can be trimmed */
-							return slotObject;
 						} else {
-							/* redirect small objects outside until stack whitespace has depleted below max_scanspace_remainder */
-							goto outside;
+							uintptr_t stackRemainder = _stackWhitespace->getWhiteSize();
+							if ((stackRemainder >= *slotObjectSizeAfterCopy) || (stackRemainder < MM_EvacuatorBase::max_scanspace_remainder) || objectScanner->isIndexableObject()) {
+								/* push small slot object up the scan stack if there is sufficient stack whitespace remaining or trailing whitespace can be trimmed or scanning array */
+								return slotObject;
+							} else {
+								/* redirect small objects outside until stack whitespace has depleted below max_scanspace_remainder */
+								goto outside;
+							}
 						}
 					} else {
-outside:				Debug_MM_true((_scanStackRegion != *evacuationRegion) || (_maxInsideCopySize < *slotObjectSizeAfterCopy) || ((stackFrame->getWhiteSize() >= MM_EvacuatorBase::max_scanspace_remainder) && !objectScanner->isIndexableObject()));
 						/* copy to outside copyspace if not possible to copy inside stack */
-						*evacuationRegion = copyOutside(slotObject, *slotObjectSizeBeforeCopy, *slotObjectSizeAfterCopy, *evacuationRegion);
+outside:				Debug_MM_true((_scanStackRegion != *evacuationRegion) || (_maxInsideCopySize < *slotObjectSizeAfterCopy) || ((_stackWhitespace->getWhiteSize() >= MM_EvacuatorBase::max_scanspace_remainder) && !objectScanner->isIndexableObject()));
+						object = copyOutside(&forwardedHeader, slotObject->readAddressFromSlot(), *slotObjectSizeBeforeCopy, *slotObjectSizeAfterCopy, *evacuationRegion);
 					}
 				} else {
-					/* slot object already evacuated -- just update slot */
+					/* update object pointer with the forwarding address */
 					object = forwardedHeader.getForwardedObject();
-					slotObject->writeReferenceToSlot(object);
-					*evacuationRegion = getEvacuationRegion(object);
 				}
+				/* update the referring slot with the forwarding address */
+				slotObject->writeReferenceToSlot(object);
 			}
 
 			/* if scanning a tenured object update its remembered state */
 			if (tenure == _scanStackRegion) {
-				object = slotObject->readReferenceFromSlot();
-				stackFrame->updateRememberedState(isInSurvivor(object));
+				stackFrame->updateRememberedState(isInSurvivor(object) || isInEvacuate(object));
 				Debug_MM_true(!isInEvacuate(object) || isAbortedCycle());
 			}
 
@@ -892,7 +973,8 @@ outside:				Debug_MM_true((_scanStackRegion != *evacuationRegion) || (_maxInside
 	}
 
 	/* this stack frame has been completely scanned */
-	Debug_MM_true(isAbortedCycle() || (stackFrame->getScanHead() == stackFrame->getCopyHead()));
+	Debug_MM_true(stackFrame->getScanHead() == stackFrame->getCopyHead());
+
 	*evacuationRegion = unreachable;
 	*slotObjectSizeBeforeCopy = 0;
 	*slotObjectSizeAfterCopy = 0;
@@ -904,7 +986,7 @@ outside:				Debug_MM_true((_scanStackRegion != *evacuationRegion) || (_maxInside
 bool
 MM_Evacuator::reserveInsideCopyspace(uintptr_t slotObjectSizeAfterCopy)
 {
-	Debug_MM_true(_peakStackFrame >= _scanStackFrame);
+	Debug_MM_true((_scanStackFrame <= _stackWhitespace) && (_stackWhitespace < _stackCeiling));
 
 	/* this is called before every push() to prepare next frame to receive an object */
 	MM_EvacuatorScanspace *nextStackFrame = _scanStackFrame + 1;
@@ -913,17 +995,18 @@ MM_Evacuator::reserveInsideCopyspace(uintptr_t slotObjectSizeAfterCopy)
 		Debug_MM_true(nextStackFrame->getScanHead() <= nextStackFrame->getCopyHead());
 		Debug_MM_true(nextStackFrame->getCopyLimit() <= nextStackFrame->getEnd());
 
-		/* the next stack frame is often a frame that was just popped while holding stack whitespace and is set as _peakStackFrame */
+		/* the next stack frame is often a frame that was just popped while holding stack whitespace and is set as _stackWhitespace */
 		if (slotObjectSizeAfterCopy > nextStackFrame->getWhiteSize()) {
-			Debug_MM_true((nextStackFrame == _peakStackFrame) || (0 == nextStackFrame->getWhiteSize()));
+			Debug_MM_true((nextStackFrame == _stackWhitespace) || (0 == nextStackFrame->getWhiteSize()));
 
-			/* object won't fit in remaining whitespace in next frame -- ensure that whitespace in _peakStackFrame is sufficient to hold object */
-			if (slotObjectSizeAfterCopy > _peakStackFrame->getWhiteSize()) {
-				_whiteList[_scanStackRegion].add(_peakStackFrame->clip());
-				/* not enough room in _peakStackFrame so try to get whitespace from top of evacuation region whitelist */
+			/* object won't fit in remaining whitespace in next frame -- ensure that whitespace in _stackWhitespace is sufficient to hold object */
+			if (slotObjectSizeAfterCopy > _stackWhitespace->getWhiteSize()) {
+
+				_whiteList[_scanStackRegion].add(_stackWhitespace->clip());
+				/* not enough room in _stackWhitespace so try to get whitespace from top of evacuation region whitelist */
 				MM_EvacuatorWhitespace *whitespace = _whiteList[_scanStackRegion].top(slotObjectSizeAfterCopy);
 				if (NULL == whitespace) {
-					/* get a new chunk of whitespace from the heap to burn down */
+					/* try to allocate whitespace from the heap */
 					whitespace = _controller->getInsideFreespace(this, _scanStackRegion, slotObjectSizeAfterCopy);
 					if (NULL == whitespace) {
 						/* force outside copy */
@@ -937,91 +1020,69 @@ MM_Evacuator::reserveInsideCopyspace(uintptr_t slotObjectSizeAfterCopy)
 						return false;
 					}
 				}
+
 				/* set up next stack frame to receive object into allocated whitespace */
 				nextStackFrame->setScanspace((uint8_t *)whitespace, (uint8_t *)whitespace, whitespace->length(), _maxInsideCopySize, whitespace->isLOA());
-				_peakStackFrame = nextStackFrame;
-			} else if (nextStackFrame != _peakStackFrame) {
-				/* set up next stack frame to receive object into whitespace pulled from _peakStackFrame */
-				nextStackFrame->pullWhitespace(_peakStackFrame, _maxInsideCopySize);
-				_peakStackFrame = nextStackFrame;
+				_stackWhitespace = nextStackFrame;
+			} else if (nextStackFrame != _stackWhitespace) {
+
+				/* set up next stack frame to receive object into whitespace pulled from _stackWhitespace */
+				nextStackFrame->pullWhitespace(_stackWhitespace, _maxInsideCopySize);
+				_stackWhitespace = nextStackFrame;
 			}
 		}
 
 		/* next stack frame is holding stack whitespace */
-		Debug_MM_true(_peakStackFrame == nextStackFrame);
+		Debug_MM_true(_stackWhitespace == nextStackFrame);
 		return true;
 	}
 
 	return false;
 }
 
-MM_Evacuator::EvacuationRegion
-MM_Evacuator::copyOutside(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy, EvacuationRegion evacuationRegion)
+omrobjectptr_t
+MM_Evacuator::copyOutside(MM_ForwardedHeader *forwardedHeader, fomrobject_t *referringSlotAddress, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy, EvacuationRegion evacuationRegion)
 {
 	/* reserve copy space */
-	bool isSplitable = isSplitablePointerArray(slotObject, slotObjectSizeAfterCopy);
+	bool isSplitable = isSplitablePointerArray(forwardedHeader, slotObjectSizeAfterCopy);
 	MM_EvacuatorCopyspace *effectiveCopyspace = reserveOutsideCopyspace(&evacuationRegion, slotObjectSizeAfterCopy, isSplitable);
+	
+	omrobjectptr_t forwardingAddress = forwardedHeader->getObject();
+	/* copy slot object to effective outside copyspace */
 	if (NULL != effectiveCopyspace) {
 		Debug_MM_true(slotObjectSizeAfterCopy <= effectiveCopyspace->getWhiteSize());
-		/* copy slot object to effective outside copyspace */
 		omrobjectptr_t copyHead = (omrobjectptr_t)effectiveCopyspace->getCopyHead();
-		if (copyHead == copyForward(slotObject, effectiveCopyspace, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy)) {
+		forwardingAddress = copyForward(forwardedHeader, referringSlotAddress, effectiveCopyspace, slotObjectSizeBeforeCopy, slotObjectSizeAfterCopy);
+		if (copyHead == forwardingAddress) {
 			/* object copied into effective copyspace -- check for sharable work to distribute */
-			uintptr_t worksize = effectiveCopyspace->getWorkSize();
 			if (effectiveCopyspace == &_largeCopyspace) {
-				MM_EvacuatorWorkPacket *work = _freeList.next();
 				if (isSplitable) {
 					/* record 1-based array offsets to mark split array work packets */
-					uintptr_t offset = 1;
-					uintptr_t elements = 0;
-
-					/* distribute elements to segments as evenly as possible and take largest segment first */
-					_delegate.getIndexableDataBounds(copyHead, &elements);
-					uintptr_t segments = (elements / MM_EvacuatorBase::max_split_segment_elements) + ((0 != (elements % MM_EvacuatorBase::max_split_segment_elements)) ? 1 : 0);
-					uintptr_t elementsPerSegment = elements / segments;
-					uintptr_t elementsThisSegment = elementsPerSegment + (elements % segments);
-
-					/* lock worklist and add each array segment as a work packet */
-					omrthread_monitor_enter(_mutex);
-					while (0 < segments) {
-						MM_EvacuatorWorkPacket *work = _freeList.next();
-						work->base = copyHead;
-						work->offset = offset;
-						work->length = elementsThisSegment;
-						_workList.add(work, &_freeList);
-						offset += elementsThisSegment;
-						elementsThisSegment = elementsPerSegment;
-						segments -= 1;
-					}
-					omrthread_monitor_exit(_mutex);
-
-					/* tell the world about it */
-					_controller->notifyOfWork();
+					splitPointerArrayWork(copyHead);
 				} else {
 					/* set up work packet contained a single large scalar or non-splitable array object */
-					Debug_MM_true((slotObjectSizeAfterCopy == worksize) && (0 == effectiveCopyspace->getWhiteSize()));
+					MM_EvacuatorWorkPacket *work = _freeList.next();
+					Debug_MM_true((slotObjectSizeAfterCopy == effectiveCopyspace->getWorkSize()) && (0 == effectiveCopyspace->getWhiteSize()));
 					work->base = (omrobjectptr_t)effectiveCopyspace->rebase(&work->length);
 					addWork(work);
 				}
 				/* prepare the large object copyspace for next use */
 				_largeCopyspace.resetCopyspace();
-			} else if ((effectiveCopyspace != _scanStackFrame) && (worksize >= _workReleaseThreshold)) {
+			} else if ((effectiveCopyspace != _scanStackFrame) && (effectiveCopyspace->getWorkSize() >= _workReleaseThreshold)) {
 				/* strip work from head of effective copyspace into a work packet, leaving only trailing whitespace in copyspace */
 				MM_EvacuatorWorkPacket *work = _freeList.next();
 				work->base = (omrobjectptr_t)effectiveCopyspace->rebase(&work->length);
 				addWork(work);
 			}
 		} else if (effectiveCopyspace == &_largeCopyspace) {
-			/* object copied by other thread */
+			/* object copied by other thread so clip reserved whitespace from large object copyspace onto the whitelist */
 			_whiteList[evacuationRegion].add(_largeCopyspace.trim());
 			/* prepare the large object copyspace for next use */
 			_largeCopyspace.resetCopyspace();
 		}
-	} else {
-		evacuationRegion = unreachable;
 	}
 
-	return evacuationRegion;
+	return forwardingAddress;
 }
 
 MM_EvacuatorCopyspace *
@@ -1062,9 +1123,8 @@ MM_Evacuator::reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, uintpt
 							whitespace = _controller->getOutsideFreespace(this, *evacuationRegion, copyspaceRemainder, slotObjectSizeAfterCopy);
 							if (NULL == whitespace) {
 								/* last chance -- outside regions and whitelists exhausted, try to steal the stack's whitespace */
-								MM_EvacuatorScanspace *whiteStackFrame = (NULL != _peakStackFrame) ? _peakStackFrame : _scanStackFrame;
-								if ((NULL != whiteStackFrame) && (slotObjectSizeAfterCopy <= whiteStackFrame->getWhiteSize())) {
-									whitespace = whiteStackFrame->clip();
+								if ((NULL != _stackWhitespace) && (slotObjectSizeAfterCopy <= _stackWhitespace->getWhiteSize())) {
+									whitespace = _stackWhitespace->clip();
 									*evacuationRegion = _scanStackRegion;
 								}
 							}
@@ -1121,7 +1181,19 @@ MM_Evacuator::reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, uintpt
 				_stats->_failedTenureLargest = OMR_MAX(slotObjectSizeAfterCopy, _stats->_failedTenureLargest);
 			}
 			/* abort the evacuation and broadcast this to other evacuators through controller */
-			_abortedCycle = _controller->setAborting(this);
+			if (!setAbortedCycle()) {
+				/* do this only if this evacuator is first to set the abort condition */
+#if defined(EVACUATOR_DEBUG)
+				if (_controller->_debugger.isDebugEnd()) {
+					OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
+					omrtty_printf("%5lu %2llu %2llu:     abort; flags:%llx", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex, _controller->sampleEvacuatorFlags());
+					if (NULL != _scanStackFrame) {
+						omrtty_printf("; scanning:0x%llx", (uintptr_t)_scanStackFrame->getScanHead());
+					}
+					omrtty_printf("\n");
+				}
+#endif /* defined(EVACUATOR_DEBUG) */
+			}
 		}
 	}
 
@@ -1131,10 +1203,13 @@ MM_Evacuator::reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, uintpt
 MMINLINE omrobjectptr_t
 MM_Evacuator::copyForward(GC_SlotObject *slotObject, MM_EvacuatorCopyspace *copyspace, uintptr_t originalLength, uintptr_t forwardedLength)
 {
-	MM_ForwardedHeader forwardedHeader(slotObject->readReferenceFromSlot());
-	omrobjectptr_t copiedObject = copyForward(&forwardedHeader, slotObject->readAddressFromSlot(), copyspace, originalLength, forwardedLength);
-	slotObject->writeReferenceToSlot(copiedObject);
-	return copiedObject;
+	omrobjectptr_t object = slotObject->readReferenceFromSlot();
+	if (isInEvacuate(object)) {
+		MM_ForwardedHeader forwardedHeader(object);
+		object = copyForward(&forwardedHeader, slotObject->readAddressFromSlot(), copyspace, originalLength, forwardedLength);
+		slotObject->writeReferenceToSlot(object);
+	}
+	return object;
 }
 
 MMINLINE omrobjectptr_t
@@ -1180,6 +1255,7 @@ MM_Evacuator::copyForward(MM_ForwardedHeader *forwardedHeader, fomrobject_t *ref
 			_stats->getFlipHistory(0)->_flipBytes[objectAge + 1] += forwardedLength;
 			_copiedBytesDelta[survivor] += forwardedLength;
 		}
+		bool updateProgress = (_scannedBytesDelta >= _copiedBytesReportingDelta) || ((_copiedBytesDelta[survivor] + _copiedBytesDelta[tenure]) >= _copiedBytesReportingDelta);
 
 		/* update object age and finalize copied object header */
 		if (tenure == getEvacuationRegion(forwardedAddress)) {
@@ -1194,11 +1270,10 @@ MM_Evacuator::copyForward(MM_ForwardedHeader *forwardedHeader, fomrobject_t *ref
 		_objectModel->fixupForwardedObject(forwardedHeader, forwardedAddress, objectAge);
 
 #if defined(EVACUATOR_DEBUG)
-		_delegate.debugValidateObject(forwardedAddress);
 		if (_controller->_debugger.isDebugCopy()) {
 			OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
 			char className[32];
-			omrobjectptr_t parent = (NULL != _scanStackFrame) ? _scanStackFrame->getObjectScanner()->getParentObject() : NULL;
+			omrobjectptr_t parent = (NULL != _scanStackFrame) ? _scanStackFrame->getActiveObjectScanner()->getParentObject() : NULL;
 			omrtty_printf("%5lu %2llu %2llu:%c copy %3s; base:%llx; copy:%llx; end:%llx; free:%llx; %llx %s %llx -> %llx %llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex,
 					(NULL != _scanStackFrame) && ((uint8_t *)forwardedAddress >= _scanStackFrame->getBase()) && ((uint8_t *)forwardedAddress < _scanStackFrame->getEnd()) ? 'I' : 'O',
 					isInSurvivor(forwardedAddress) ? "new" : "old",	(uintptr_t)copyspace->getBase(), (uintptr_t)copyspace->getCopyHead(), (uintptr_t)copyspace->getEnd(), copyspace->getWhiteSize(),
@@ -1206,10 +1281,17 @@ MM_Evacuator::copyForward(MM_ForwardedHeader *forwardedHeader, fomrobject_t *ref
 		}
 #endif /* defined(EVACUATOR_DEBUG) */
 
-		/* object was copied by this thread -- advance the copy head in the receiving copyspace */
+		/* advance the copy head in the receiving copyspace and track scan/copy progress */
 		copyspace->advanceCopyHead(forwardedLength);
+		if (updateProgress) {
+			_controller->reportProgress(this, _copiedBytesDelta, &_scannedBytesDelta);
+		}
 	}
 
+#if defined(EVACUATOR_DEBUG)
+	_delegate.debugValidateObject(forwardedAddress);
+#endif /* defined(EVACUATOR_DEBUG) */
+	
 	return forwardedAddress;
 }
 
@@ -1217,62 +1299,73 @@ MM_Evacuator::copyForward(MM_ForwardedHeader *forwardedHeader, fomrobject_t *ref
 bool
 MM_Evacuator::shouldRememberObject(omrobjectptr_t objectPtr)
 {
+#if defined(EVACUATOR_DEBUG)
+	_delegate.debugValidateObject(objectPtr);
 	Debug_MM_true((NULL != objectPtr) && isInTenure(objectPtr));
+	Debug_MM_true(_objectModel->getRememberedBits(objectPtr) < (uintptr_t)0xc0);
+#endif /* defined(EVACUATOR_DEBUG) */
 
-	/* This method should be only called for RS pruning scan (whether in backout or not),
-	 * which is either single threaded (overflow or backout), or if multi-threaded it does no work sharing.
-	 * So we must not split, if it's indexable
-	 */
+	/* inhibit array splitting to ensure entire object is scanned here */
 	GC_ObjectScannerState objectScannerState;
-	uintptr_t scannerFlags = GC_ObjectScanner::scanRoots | GC_ObjectScanner::indexableObjectNoSplit;
-	GC_ObjectScanner *objectScanner = getObjectScanner(objectPtr, &objectScannerState, scannerFlags);
+	GC_ObjectScanner *objectScanner = _delegate.getObjectScanner(objectPtr, &objectScannerState, GC_ObjectScanner::scanRoots | GC_ObjectScanner::indexableObjectNoSplit);
 	if (NULL != objectScanner) {
 		GC_SlotObject *slotPtr;
 		while (NULL != (slotPtr = objectScanner->getNextSlot())) {
 			omrobjectptr_t slotObjectPtr = slotPtr->readReferenceFromSlot();
 			if (NULL != slotObjectPtr) {
+#if defined(EVACUATOR_DEBUG)
+				Debug_MM_true(_delegate.isValidObject(slotObjectPtr));
+#endif /* defined(EVACUATOR_DEBUG) */
 				if (isInSurvivor(slotObjectPtr)) {
 					return true;
 				} else {
-					Debug_MM_true(isInTenure(slotObjectPtr) || (isInEvacuate(slotObjectPtr) && objectScanner->isIndexableObject()));
+					Debug_MM_true(isInTenure(slotObjectPtr) || isAbortedCycle());
 				}
 			}
 		}
 	}
 
-	/* The remembered state of a class object also depends on the class statics */
-	if (_env->getExtensions()->objectModel.hasIndirectObjectReferents((CLI_THREAD_TYPE*)_env->getLanguageVMThread(), objectPtr)) {
+	/* the remembered state of a class object also depends on the class statics */
+	if (_objectModel->hasIndirectObjectReferents((CLI_THREAD_TYPE*)_env->getLanguageVMThread(), objectPtr)) {
 		return _delegate.objectHasIndirectObjectsInNursery(objectPtr);
 	}
 
 	return false;
 }
 
-void
+bool
 MM_Evacuator::rememberObject(omrobjectptr_t object, bool isThreadReference)
 {
 	Debug_MM_true(isInTenure(object));
+	Debug_MM_true(_objectModel->getRememberedBits(object) < (uintptr_t)0xc0);
+	bool rememberedByThisEvacuator = false;
+
 	/* try to set the REMEMBERED bit in the flags field (if it hasn't already been set) */
 	if (_objectModel->atomicSetRememberedState(object, STATE_REMEMBERED)) {
-		/* the object has been successfully marked as REMEMBERED - allocate an entry in the remembered set */
 		Debug_MM_true(_objectModel->isRemembered(object));
 		Debug_MM_true(!_controller->_debugger.isDebugRemembered() || isThreadReference || shouldRememberObject(object));
-		if (_env->_scavengerRememberedSet.fragmentCurrent >= _env->_scavengerRememberedSet.fragmentTop) {
-			/* there isn't enough room in the current fragment - allocate a new one */
-			if (allocateMemoryForSublistFragment(_env->getOmrVMThread(), (J9VMGC_SublistFragment*)&_env->_scavengerRememberedSet)) {
-				/* Failed to allocate a fragment - set the remembered set overflow state and exit */
-				if (!_env->getExtensions()->isRememberedSetInOverflowState()) {
-					_stats->_causedRememberedSetOverflow = 1;
-				}
-				_env->getExtensions()->setRememberedSetOverflowState();
-				return;
+
+		/* the object has been successfully marked as REMEMBERED - allocate an entry in the remembered set */
+		if ((_env->_scavengerRememberedSet.fragmentCurrent < _env->_scavengerRememberedSet.fragmentTop) ||
+				(0 == allocateMemoryForSublistFragment(_env->getOmrVMThread(), (J9VMGC_SublistFragment*)&_env->_scavengerRememberedSet))
+		) {
+			/* there is at least 1 free entry in the fragment - use it */
+			_env->_scavengerRememberedSet.count++;
+			uintptr_t *rememberedSetEntry = _env->_scavengerRememberedSet.fragmentCurrent++;
+			*rememberedSetEntry = (uintptr_t)object;
+		} else {
+			/* Failed to allocate a fragment - set the remembered set overflow state */
+			if (!_env->getExtensions()->isRememberedSetInOverflowState()) {
+				_stats->_causedRememberedSetOverflow = 1;
 			}
+			_env->getExtensions()->setRememberedSetOverflowState();
 		}
-		/* there is at least 1 free entry in the fragment - use it */
-		_env->_scavengerRememberedSet.count++;
-		uintptr_t *rememberedSetEntry = _env->_scavengerRememberedSet.fragmentCurrent++;
-		*rememberedSetEntry = (uintptr_t)object;
+
+		rememberedByThisEvacuator = true;
 	}
+
+	Debug_MM_true(_objectModel->getRememberedBits(object) < (uintptr_t)0xc0);
+	return rememberedByThisEvacuator;
 }
 
 void
@@ -1367,7 +1460,7 @@ MM_Evacuator::findWork()
 MM_EvacuatorWorkPacket *
 MM_Evacuator::loadWork()
 {
-	Debug_MM_true((NULL == _scanStackFrame) || isAbortedCycle());
+	Debug_MM_true(NULL == _scanStackFrame);
 
 	MM_EvacuatorWorkPacket *work = NULL;
 	if (!isAbortedCycle()) {
@@ -1385,8 +1478,8 @@ MM_Evacuator::loadWork()
 		/* worklist is empty, or aborting; if nothing in outside copyspaces or no other evacuators are stalled try to pull work from other evacuators */
 		if (!_controller->areAnyEvacuatorsStalled() || !hasOutsideWork || isAbortedCycle()) {
 			flushForWaitState();
-			_controller->reportProgress(this, _copiedBytesDelta, &_scannedBytesDelta);
 
+			_controller->reportProgress(this, _copiedBytesDelta, &_scannedBytesDelta);
 			_controller->acquireController();
 			work = findWork();
 			if ((NULL == work) && (!hasOutsideWork || isAbortedCycle())) {
@@ -1500,3 +1593,33 @@ MM_Evacuator::debugStack(const char *stackOp, bool treatAsWork)
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 }
+
+#if defined(EVACUATOR_DEBUG)
+void
+MM_Evacuator::scanTenureForForgottenObjects()
+{
+	OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
+	MM_GCExtensionsBase *extensions = _env->getExtensions();
+	omrobjectptr_t object = (omrobjectptr_t)(_heapBounds[tenure][0]);
+	omrobjectptr_t end = (omrobjectptr_t)(_heapBounds[tenure][1]);
+	while (extensions->isOld(object)) {
+		while (extensions->isOld(object) && _objectModel->isDeadObject(object)) {
+			object = (omrobjectptr_t)((uintptr_t)object + _objectModel->getSizeInBytesDeadObject(object));
+		}
+		if (extensions->isOld(object)) {
+			Debug_MM_true(_objectModel->getRememberedBits(object) < (uintptr_t)0xc0);
+			if (_objectModel->isRemembered(object)) {
+				if (!shouldRememberObject(object)) {
+					omrtty_printf("%5lu %2llu %2llu:downgraded; object:%llx; flags:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex, (uintptr_t)object, _objectModel->getObjectFlags(object));
+				}
+			} else if (shouldRememberObject(object)) {
+				omrtty_printf("%5lu %2llu %2llu: !remember; object:%llx; flags:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex, (uintptr_t)object, _objectModel->getObjectFlags(object));
+				Debug_MM_true(isAbortedCycle());
+			}
+			object = (omrobjectptr_t)((uintptr_t)object + _objectModel->getConsumedSizeInBytesWithHeader(object));
+		}
+	}
+	omrtty_printf("%5lu %2llu %2llu: forgotten; end:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex, (uintptr_t)object);
+	Debug_MM_true(object == end);
+}
+#endif /* defined(EVACUATOR_DEBUG) */
