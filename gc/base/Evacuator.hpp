@@ -81,8 +81,8 @@ private:
 	MM_EvacuatorScanspace * const _stackBottom;		/* bottom (location) of work stack */
 	MM_EvacuatorScanspace * const _stackCeiling;	/* physical limit of depth of evacuation work stack */
 	MM_EvacuatorScanspace * _stackLimit;			/* operational limit of depth of work stack */
-	MM_EvacuatorScanspace *_peakStackFrame;			/* least recently popped stack frame since last push (may hold whitespace for next push) */
-	MM_EvacuatorScanspace *_scanStackFrame;			/* active stack frame at current stack position, NULL if work stack empty */
+	MM_EvacuatorScanspace *_whiteStackFrame;		/* points to stack frame that holds the tail of the most recent allocation of inside whitespace */
+	MM_EvacuatorScanspace *_scanStackFrame;			/* active stack frame at current stack position, NULL if work stack empty (== _whiteStackFrame unless popping) */
 
 	MM_EvacuatorCopyspace * const _copyspace;		/* points to array of outside copyspace to receive outside copy, one for each of survivor, tenure */
 	MM_EvacuatorWhitelist * const _whiteList;		/* points to array of priority queue (largest on top) of whitespace, one for each of survivor, tenure */
@@ -366,7 +366,7 @@ public:
 		, _stackBottom(MM_EvacuatorScanspace::newInstanceArray(_forge, MM_EvacuatorBase::max_scan_stack_depth))
 		, _stackCeiling(_stackBottom + MM_EvacuatorBase::max_scan_stack_depth)
 		, _stackLimit(_stackCeiling)
-		, _peakStackFrame(NULL)
+		, _whiteStackFrame(NULL)
 		, _scanStackFrame(NULL)
 		, _copyspace(MM_EvacuatorCopyspace::newInstanceArray(_forge, evacuate))
 		, _whiteList(MM_EvacuatorWhitelist::newInstanceArray(_forge, evacuate))
