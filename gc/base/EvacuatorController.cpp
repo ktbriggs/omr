@@ -492,38 +492,39 @@ MM_EvacuatorController::continueAfterStall(MM_Evacuator *worker, MM_EvacuatorWor
 void
 MM_EvacuatorController::reportProgress(MM_Evacuator *worker,  uint64_t *copied, uint64_t *scanned)
 {
-	uint64_t totalCopied = VM_AtomicSupport::addU64(&_copiedBytes[MM_Evacuator::survivor], copied[MM_Evacuator::survivor]);
-	totalCopied += VM_AtomicSupport::addU64(&_copiedBytes[MM_Evacuator::tenure], copied[MM_Evacuator::tenure]);
+	uint64_t survivorCopied = VM_AtomicSupport::addU64(&_copiedBytes[MM_Evacuator::survivor], copied[MM_Evacuator::survivor]);
+	uint64_t tenureCopied = VM_AtomicSupport::addU64(&_copiedBytes[MM_Evacuator::tenure], copied[MM_Evacuator::tenure]);
 	uint64_t totalScanned = VM_AtomicSupport::addU64(&_scannedBytes, *scanned);
 
 	copied[MM_Evacuator::survivor] = 0;
 	copied[MM_Evacuator::tenure] = 0;
 	*scanned = 0;
 
-#if defined(EVACUATOR_DEBUG)
-	uint64_t survivorCopied = _copiedBytes[MM_Evacuator::survivor];
-	uint64_t tenureCopied = _copiedBytes[MM_Evacuator::tenure];
-#endif /* defined(EVACUATOR_DEBUG) */
-
+	uint64_t totalCopied = survivorCopied + tenureCopied;
 	if ((totalCopied == totalScanned) || (totalCopied >= _nextEpochCopiedBytesThreshold)) {
 		uint64_t nextEpochCopiedBytesThreshold = _nextEpochCopiedBytesThreshold;
 		if (nextEpochCopiedBytesThreshold == VM_AtomicSupport::lockCompareExchangeU64(&_nextEpochCopiedBytesThreshold, nextEpochCopiedBytesThreshold, nextEpochCopiedBytesThreshold + (_copiedBytesReportingDelta * _evacuatorCount))) {
-			OMRPORT_ACCESS_FROM_ENVIRONMENT(worker->getEnvironment());
-			uint64_t currentTimestamp = omrtime_hires_clock();
-			uint64_t epochDurationMicros = omrtime_hires_delta(_epochTimestamp, currentTimestamp, OMRPORT_TIME_DELTA_IN_MICROSECONDS);
-			uintptr_t tlhAllocationCeiling = calculateOptimalWhitespaceSize(worker, MM_Evacuator::survivor);
-			uintptr_t releaseThreshold = calculateOptimalWorkPacketSize(worker->getVolumeOfWork());
-
+			MM_EvacuatorHistory::Epoch *epoch = NULL;
 			if (omrthread_monitor_try_enter(_reporterMutex)) {
-				MM_EvacuatorHistory::Epoch *epoch = _history.add(worker->getEnvironment()->_scavengerStats._gcCount, epochDurationMicros, totalCopied, totalScanned);
-				epoch->tlhAllocationCeiling = tlhAllocationCeiling;
-				epoch->releaseThreshold = releaseThreshold;
+				OMRPORT_ACCESS_FROM_ENVIRONMENT(worker->getEnvironment());
+				uint64_t currentTimestamp = omrtime_hires_clock();
+
+				epoch = _history.add();
+				epoch->gc = worker->getEnvironment()->_scavengerStats._gcCount;
+				epoch->duration = omrtime_hires_delta(_epochTimestamp, currentTimestamp, OMRPORT_TIME_DELTA_IN_MICROSECONDS);
+				epoch->copied = totalCopied;
+				epoch->scanned = totalScanned;
+				epoch->tlhAllocationCeiling = calculateOptimalWhitespaceSize(worker, MM_Evacuator::survivor);
+				epoch->releaseThreshold = calculateOptimalWorkPacketSize(worker->getVolumeOfWork());
+
 				_epochTimestamp = currentTimestamp;
-				_history.commit(epoch);
 				omrthread_monitor_exit(_reporterMutex);
+			}
+
 #if defined(EVACUATOR_DEBUG)
+			if (NULL != epoch) {
 				_debugger.setDebugCycleAndEpoch(epoch->gc, epoch->epoch);
-				if (_debugger.isDebugEpoch() && (_epochTimestamp == currentTimestamp)) {
+				if (_debugger.isDebugEpoch()) {
 					OMRPORT_ACCESS_FROM_ENVIRONMENT(worker->getEnvironment());
 					uint64_t delta = (totalCopied > epoch->scanned) ? (totalCopied - epoch->scanned) : 0;
 					omrtty_printf("%5llu %2llu %2llu:     ", epoch->gc, epoch->epoch, worker->getWorkerIndex());
@@ -531,8 +532,8 @@ MM_EvacuatorController::reportProgress(MM_Evacuator *worker,  uint64_t *copied, 
 					omrtty_printf("; %llx %llx %llx %llx %llu %llx %llx\n", survivorCopied, tenureCopied, epoch->scanned, delta, epoch->duration,
 							epoch->tlhAllocationCeiling, epoch->releaseThreshold);
 				}
-#endif /* defined(EVACUATOR_DEBUG) */
 			}
+#endif /* defined(EVACUATOR_DEBUG) */
 		}
 	}
 }
