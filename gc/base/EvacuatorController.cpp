@@ -521,18 +521,18 @@ MM_EvacuatorController::reportProgress(MM_Evacuator *worker,  uint64_t *copied, 
 				_epochTimestamp = currentTimestamp;
 				_history.commit(epoch);
 				omrthread_monitor_exit(_reporterMutex);
-			}
-
 #if defined(EVACUATOR_DEBUG)
-			_debugger.setDebugCycleAndEpoch(epoch->gc, epoch->epoch);
-			if (_debugger.isDebugEpoch() && (_epochTimestamp == currentTimestamp)) {
-				OMRPORT_ACCESS_FROM_ENVIRONMENT(worker->getEnvironment());
-				uint64_t delta = (totalCopied > epoch->scanned) ? (totalCopied - epoch->scanned) : 0;
-				omrtty_printf("%5llu %2llu %2llu:     epoch; %llx %llx %llx %llx %llx %llu %llx %llx\n", epoch->gc, epoch->epoch, worker->getWorkerIndex(),
-						_stalledEvacuatorBitmap, survivorCopied, tenureCopied, epoch->scanned, delta, epoch->duration,
-						epoch->tlhAllocationCeiling, epoch->releaseThreshold);
-			}
+				_debugger.setDebugCycleAndEpoch(epoch->gc, epoch->epoch);
+				if (_debugger.isDebugEpoch() && (_epochTimestamp == currentTimestamp)) {
+					OMRPORT_ACCESS_FROM_ENVIRONMENT(worker->getEnvironment());
+					uint64_t delta = (totalCopied > epoch->scanned) ? (totalCopied - epoch->scanned) : 0;
+					omrtty_printf("%5llu %2llu %2llu:     ", epoch->gc, epoch->epoch, worker->getWorkerIndex());
+					printEvacuatorBitmap(worker->getEnvironment(), "epoch;", _stalledEvacuatorBitmap);
+					omrtty_printf("; %llx %llx %llx %llx %llu %llx %llx\n", survivorCopied, tenureCopied, epoch->scanned, delta, epoch->duration,
+							epoch->tlhAllocationCeiling, epoch->releaseThreshold);
+				}
 #endif /* defined(EVACUATOR_DEBUG) */
+			}
 		}
 	}
 }

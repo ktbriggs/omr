@@ -386,8 +386,6 @@ MM_Evacuator::workThreadGarbageCollect(MM_EnvironmentStandard *env)
 		_whiteStackFrame->resetScanspace();
 		_whiteStackFrame = NULL;
 	}
-	/* large survivor whitespace fragments on the whitelist may be recycled back into the memory pool */
-	flushWhitespace(survivor);
 
 	/* release unused whitespace from outside copyspaces */
 	for (intptr_t space = (intptr_t)survivor; space <= (intptr_t)tenure; space += 1) {
@@ -401,6 +399,9 @@ MM_Evacuator::workThreadGarbageCollect(MM_EnvironmentStandard *env)
 	Debug_MM_true(0 == _largeCopyspace.getWorkSize());
 	Debug_MM_true(0 == _largeCopyspace.getWhiteSize());
 	_largeCopyspace.resetCopyspace();
+
+	/* large survivor whitespace fragments on the whitelist may be recycled back into the memory pool */
+	flushWhitespace(survivor);
 
 	if (!isAbortedCycle()) {
 		/* prune remembered set */
