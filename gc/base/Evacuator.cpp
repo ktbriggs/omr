@@ -612,7 +612,7 @@ MM_Evacuator::nextObjectScanner(MM_EvacuatorScanspace *scanspace, bool finalizeO
 	uintptr_t scannedBytes = 0;
 
 	/* finalize object scan for current object scanner, if any */
-	GC_ObjectScanner *objectScanner = scanspace->getObjectScanner();
+	GC_ObjectScanner *objectScanner = scanspace->getActiveObjectScanner();
 	if (finalizeObjectScan && (NULL != objectScanner)) {
 		/* advance scan head past parent object or split array segment */
 		scannedBytes = _objectModel->getConsumedSizeInBytesWithHeader(objectScanner->getParentObject());
@@ -1199,7 +1199,7 @@ MM_Evacuator::copyForward(MM_ForwardedHeader *forwardedHeader, fomrobject_t *ref
 		if (_controller->_debugger.isDebugCopy()) {
 			OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
 			char className[32];
-			omrobjectptr_t parent = (NULL != _scanStackFrame) ? _scanStackFrame->getObjectScanner()->getParentObject() : NULL;
+			omrobjectptr_t parent = (NULL != _scanStackFrame) ? _scanStackFrame->getActiveObjectScanner()->getParentObject() : NULL;
 			omrtty_printf("%5lu %2llu %2llu:%c copy %3s; base:%llx; copy:%llx; end:%llx; free:%llx; %llx %s %llx -> %llx %llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex,
 					(NULL != _scanStackFrame) && ((uint8_t *)forwardedAddress >= _scanStackFrame->getBase()) && ((uint8_t *)forwardedAddress < _scanStackFrame->getEnd()) ? 'I' : 'O',
 					isInSurvivor(forwardedAddress) ? "new" : "old",	(uintptr_t)copyspace->getBase(), (uintptr_t)copyspace->getCopyHead(), (uintptr_t)copyspace->getEnd(), copyspace->getWhiteSize(),
