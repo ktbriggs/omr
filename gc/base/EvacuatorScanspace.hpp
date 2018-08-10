@@ -88,16 +88,16 @@ public:
 	 * Current or latent object scanner is instantiated in space reserved within containing scanspace. This
 	 * method should only be called when caller is committed to use the returned pointer for this purpose.
 	 *
-	 * To get current pointer to active object scanner, which may be NULL, use gertObjectScanner().
+	 * To get current pointer to active object scanner, which may be NULL, use getObjectScanner().
 	 *
-	 * @see getObjectScanner()
+	 * @see getActiveObjectScanner()
 	 */
 	MMINLINE GC_ObjectScannerState *getObjectScannerState() { _objectScanner = (GC_ObjectScanner *)&_objectScannerState; return &_objectScannerState; }
 
 	/**
-	 * Return pointer to instantiated object scanner, or NULL if object scanner not instantiated.
+	 * Return pointer to active object scanner, or NULL if object scanner not instantiated.
 	 */
-	MMINLINE GC_ObjectScanner *getObjectScanner() { return _objectScanner; }
+	MMINLINE GC_ObjectScanner *getActiveObjectScanner() { return _objectScanner; }
 
 	/**
 	 * Advance the scan pointer to next unscanned object and drop active object scanner.
