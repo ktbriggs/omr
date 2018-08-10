@@ -23,8 +23,8 @@
 #ifndef EVACUATORBASE_HPP_
 #define EVACUATORBASE_HPP_
 
-#undef EVACUATOR_DEBUG
-#define EVACUATOR_DEBUG_ALWAYS
+#define EVACUATOR_DEBUG
+#undef EVACUATOR_DEBUG_ALWAYS
 
 #if defined(EVACUATOR_DEBUG)
 #include "omrgcconsts.h"
@@ -47,7 +47,7 @@
 #define EVACUATOR_DEBUG_DELEGATE 2048
 
 /* default debug flags */
-#define EVACUATOR_DEBUG_DEFAULT_FLAGS (0)
+#define EVACUATOR_DEBUG_DEFAULT_FLAGS (1)
 
 /* delegate can define additional flags above 0x10000 */
 #define EVACUATOR_DEBUG_DELEGATE_BASE 0x10000
