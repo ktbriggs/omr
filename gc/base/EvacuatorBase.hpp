@@ -47,7 +47,7 @@
 #define EVACUATOR_DEBUG_DELEGATE 2048
 
 /* default debug flags */
-#define EVACUATOR_DEBUG_DEFAULT_FLAGS (1)
+#define EVACUATOR_DEBUG_DEFAULT_FLAGS (0)
 
 /* delegate can define additional flags above 0x10000 */
 #define EVACUATOR_DEBUG_DELEGATE_BASE 0x10000
