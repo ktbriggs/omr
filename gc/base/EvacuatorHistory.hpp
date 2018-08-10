@@ -76,24 +76,15 @@ public:
 	/* get the most recently committed epoch */
 	Epoch *epoch() { return epoch((0 < _epoch) ? (_epoch - 1) : 0); }
 
-	/* reserve tail of historic record to receive stats for closiing epoch */
+	/* reserve tail of historic record to receive stats for closing epoch */
 	Epoch *
-	add(uintptr_t gc, uint64_t duration, uint64_t copied, uint64_t scanned)
+	add()
 	{
-		uintptr_t epoch = epochToIndex();
-		_history[epoch].epoch = _epoch;
-		_history[epoch].gc = gc;
-		_history[epoch].duration = duration;
-		_history[epoch].copied = copied;
-		_history[epoch].scanned = scanned;
-		return &_history[epoch];
+		uintptr_t next = VM_AtomicSupport::add(&_epoch, 1) - 1;
+		Epoch *epoch = &_history[epochToIndex(next)];
+		epoch->epoch = next;
+		return epoch;
 	}
-
-	/* get the predecessor of the epoch that is being prepared for commit */
-	Epoch *last() { return &_history[((0 < _epoch) && (reports_per_cycle > _epoch)) ? (_epoch - 1) : epochToIndex()]; }
-
-	/* commit closing epoch and open a new one */
-	void commit(Epoch *epoch) { Debug_MM_true(epoch == &_history[epochToIndex()]); VM_AtomicSupport::add(&_epoch, 1); }
 
 	/* clear history for starting a gc cycle */
 	void
