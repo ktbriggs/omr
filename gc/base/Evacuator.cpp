@@ -304,6 +304,18 @@ MM_Evacuator::evacuateHeap()
 }
 
 bool
+MM_Evacuator::setAbortedCycle()
+{
+	/* assume controller doesn't know that the cycle is aborting */
+	bool isIdempotent = true;
+	if (!_abortedCycle) {
+		isIdempotent = _controller->setAborting();
+		_abortedCycle = true;
+	}
+	return isIdempotent;
+}
+
+bool
 MM_Evacuator::isAbortedCycle()
 {
 	if (!_abortedCycle) {
@@ -1104,7 +1116,7 @@ MM_Evacuator::reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, uintpt
 			} else {
 				/* object will be exactly contained in whitespace so load whitespace into large copyspace */
 				copyspace = &_largeCopyspace;
-				Debug_MM_true4(_env, (slotObjectSizeAfterCopy > MM_EvacuatorBase::max_copyspace_remainder), "object should fit in outside %s copyspace tail: object=%llx; survivor-tail=%llx; tenure-tail=%llx\n",
+				Debug_MM_true4(_env, (slotObjectSizeAfterCopy >= MM_EvacuatorBase::max_copyspace_remainder), "object should fit in outside %s copyspace tail: object=%llx; survivor-tail=%llx; tenure-tail=%llx\n",
 						((survivor == *evacuationRegion) ? "survivor" : "tenure"), slotObjectSizeAfterCopy, _copyspace[survivor].getWhiteSize(), _copyspace[tenure].getWhiteSize());
 				Debug_MM_true(slotObjectSizeAfterCopy == whitespace->length());
 				Debug_MM_true(0 == copyspace->getWorkSize());
@@ -1122,7 +1134,19 @@ MM_Evacuator::reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, uintpt
 				_stats->_failedTenureLargest = OMR_MAX(slotObjectSizeAfterCopy, _stats->_failedTenureLargest);
 			}
 			/* abort the evacuation and broadcast this to other evacuators through controller */
-			_abortedCycle = _controller->setAborting(this);
+			if (!setAbortedCycle()) {
+				/* do this only if this evacuator is first to set the abort condition */
+#if defined(EVACUATOR_DEBUG)
+				if (_controller->_debugger.isDebugEnd()) {
+					OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
+					omrtty_printf("%5lu %2llu %2llu:     abort; flags:%llx", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex, _controller->sampleEvacuatorFlags());
+					if (NULL != _scanStackFrame) {
+						omrtty_printf("; scanning:0x%llx", (uintptr_t)_scanStackFrame->getScanHead());
+					}
+					omrtty_printf("\n");
+				}
+#endif /* defined(EVACUATOR_DEBUG) */
+			}
 		}
 	}
 
@@ -1501,3 +1525,33 @@ MM_Evacuator::debugStack(const char *stackOp, bool treatAsWork)
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 }
+
+#if defined(EVACUATOR_DEBUG)
+void
+MM_Evacuator::scanTenureForForgottenObjects()
+{
+	OMRPORT_ACCESS_FROM_ENVIRONMENT(_env);
+	MM_GCExtensionsBase *extensions = _env->getExtensions();
+	omrobjectptr_t object = (omrobjectptr_t)(_heapBounds[tenure][0]);
+	omrobjectptr_t end = (omrobjectptr_t)(_heapBounds[tenure][1]);
+	while (extensions->isOld(object)) {
+		while (extensions->isOld(object) && _objectModel->isDeadObject(object)) {
+			object = (omrobjectptr_t)((uintptr_t)object + _objectModel->getSizeInBytesDeadObject(object));
+		}
+		if (extensions->isOld(object)) {
+			Debug_MM_true(_objectModel->getRememberedBits(object) < (uintptr_t)0xc0);
+			if (_objectModel->isRemembered(object)) {
+				if (!shouldRememberObject(object)) {
+					omrtty_printf("%5lu %2llu %2llu:downgraded; object:%llx; flags:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex, (uintptr_t)object, _objectModel->getObjectFlags(object));
+				}
+			} else if (shouldRememberObject(object)) {
+				omrtty_printf("%5lu %2llu %2llu: !remember; object:%llx; flags:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex, (uintptr_t)object, _objectModel->getObjectFlags(object));
+				Debug_MM_true(isAbortedCycle());
+			}
+			object = (omrobjectptr_t)((uintptr_t)object + _objectModel->getConsumedSizeInBytesWithHeader(object));
+		}
+	}
+	omrtty_printf("%5lu %2llu %2llu: forgotten; end:%llx\n", _controller->getEpoch()->gc, _controller->getEpoch()->epoch, _workerIndex, (uintptr_t)object);
+	Debug_MM_true(object == end);
+}
+#endif /* defined(EVACUATOR_DEBUG) */

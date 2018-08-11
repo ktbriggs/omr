@@ -375,9 +375,11 @@ public:
 	bool isAborting() { return isEvacuatorFlagSet(aborting); }
 
 	/**
-	 * Set global abort flag to true. This is set if any evacuator raises an abort condition
+	 * Atomically test and set global abort flag to true. This is set if any evacuator raises an abort condition.
+	 *
+	 * @return true if abort flag was previously set, false if caller is first to set it
 	 */
-	bool setAborting(MM_Evacuator *abortingWorker);
+	bool setAborting();
 
 	/**
 	 * Parallel task wrapper calls this to bind worker thread to an evacuator instance at the beginning of a gc cycle.

@@ -100,6 +100,7 @@ public:
  * Function members
  */
 private:
+	MMINLINE bool setAbortedCycle();
 	MMINLINE bool isAbortedCycle();
 	MMINLINE bool isBreadthFirst();
 	MMINLINE void debugStack(const char *stackOp, bool treatAsWork = false);
@@ -337,6 +338,10 @@ public:
 	 * @param[in] env worker thread environment to unbind from
 	 */
 	void unbindWorkerThread(MM_EnvironmentStandard *env);
+
+#if defined(EVACUATOR_DEBUG)
+	void scanTenureForForgottenObjects();
+#endif /* defined(EVACUATOR_DEBUG) */
 
 	/**
 	 * Constructor
