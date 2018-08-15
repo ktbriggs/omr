@@ -108,10 +108,10 @@ private:
 	MMINLINE void addWork(MM_EvacuatorWorkPacket *work);
 	MMINLINE MM_EvacuatorWorkPacket *findWork();
 	MMINLINE MM_EvacuatorWorkPacket *loadWork();
-
-	MMINLINE GC_ObjectScanner *getObjectScanner(omrobjectptr_t objectPtr, GC_ObjectScannerState *scannerSpace, uintptr_t flags);
-	MMINLINE GC_ObjectScanner *nextObjectScanner(MM_EvacuatorScanspace *scanspace, bool finalizeObjectScan = true);
 	MMINLINE void push(MM_EvacuatorWorkPacket *work);
+
+	MMINLINE GC_ObjectScanner *nextObjectScanner(MM_EvacuatorScanspace *scanspace, bool finalizeObjectScan = true);
+	MMINLINE void scan();
 	MMINLINE void push(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy);
 	MMINLINE void pop();
 	MMINLINE void flush(GC_SlotObject *slotObject);
@@ -121,13 +121,14 @@ private:
 	MMINLINE GC_SlotObject *copyInside(uintptr_t *slotObjectSizeBeforeCopy, uintptr_t *slotObjectSizeAfterCopy, EvacuationRegion *evacuationRegion);
 
 	MMINLINE MM_EvacuatorCopyspace *reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, uintptr_t slotObjectSizeAfterCopy, bool useLargeObjectCopyspace = false);
-	MMINLINE EvacuationRegion copyOutside(GC_SlotObject *slotObject, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy, EvacuationRegion evacuationRegion);
+	MMINLINE omrobjectptr_t copyOutside(MM_ForwardedHeader *forwardedHeader, fomrobject_t *referringSlotAddress, uintptr_t slotObjectSizeBeforeCopy, uintptr_t slotObjectSizeAfterCopy, EvacuationRegion evacuationRegion);
 
 	MMINLINE omrobjectptr_t copyForward(MM_ForwardedHeader *forwardedHeader, fomrobject_t *referringSlotAddress, MM_EvacuatorCopyspace *copyspace, uintptr_t originalLength, uintptr_t forwardedLength);
 	MMINLINE omrobjectptr_t copyForward(GC_SlotObject *slotObject, MM_EvacuatorCopyspace *copyspace, uintptr_t originalLength, uintptr_t forwardedLength);
 
 	MMINLINE bool isSplitArrayPacket(MM_EvacuatorWorkPacket *work) { return (0 < work->offset); }
-	MMINLINE bool isSplitablePointerArray(GC_SlotObject *slotObject, uintptr_t objectSizeInBytes);
+	MMINLINE bool isSplitablePointerArray(MM_ForwardedHeader *forwardedHeader, uintptr_t objectSizeInBytes);
+	void splitPointerArrayWork(omrobjectptr_t pointerArray);
 
 	void scanRoots();
 	void scanRemembered();
@@ -135,7 +136,7 @@ private:
 	bool scanClearable();
 	void scanComplete();
 
-	void rememberObject(omrobjectptr_t object, bool isThreadSlot = false);
+	bool rememberObject(omrobjectptr_t object, bool isThreadSlot = false);
 	MMINLINE bool isNurseryAge(uintptr_t objectAge) { return (0 == (((uintptr_t)1 << objectAge) & _tenureMask)); }
 	MMINLINE void flushForWaitState();
 	MMINLINE void flushRememberedSet();
@@ -246,7 +247,7 @@ public:
 	 * @param objectptr the remembered object, in tenure space
 	 * @return true if the remembered object contained any evacuated referents
 	 */
-	bool evacuateRememberedObjectReferents(omrobjectptr_t objectptr);
+	bool evacuateRememberedObject(omrobjectptr_t objectptr);
 
 	/**
 	 * Test tenured object for containment of referents in survivor space. This method should not be
@@ -340,7 +341,8 @@ public:
 	void unbindWorkerThread(MM_EnvironmentStandard *env);
 
 #if defined(EVACUATOR_DEBUG)
-	void scanTenureForForgottenObjects();
+	void checkSurvivor();
+	void checkTenure();
 #endif /* defined(EVACUATOR_DEBUG) */
 
 	/**
