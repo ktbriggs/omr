@@ -1360,7 +1360,7 @@ public:
 		, scvTenureStrategyLookback(true)
 		, scvTenureStrategyHistory(true)
 		, scavengerEnabled(false)
-		, evacuatorEnabled(true)
+		, evacuatorEnabled(false)
 #if defined(OMR_GC_CONCURRENT_SCAVENGER)
 		, softwareEvacuateReadBarrier(false)
 		, concurrentScavenger(false)

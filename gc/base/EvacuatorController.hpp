@@ -268,12 +268,6 @@ private:
 	/* clear evacuator bit in evacuator bitmap */
 	MMINLINE void clearEvacuatorBit(uintptr_t evacuatorIndex, volatile uint64_t *bitmap);
 
-	/* test for object alignment */
-	bool isObjectAligned(void *pointer) { return 0 == ((uintptr_t)pointer & (_objectAlignmentInBytes - 1)); }
-
-	/* align to object size */
-	uintptr_t alignToObjectSize(uintptr_t size) { return _extensions->objectModel.adjustSizeInBytes(size); }
-
 protected:
 	virtual bool initialize(MM_EnvironmentBase *env);
 	virtual void tearDown(MM_EnvironmentBase *env);
@@ -296,6 +290,22 @@ protected:
 
 public:
 	MM_GCExtensionsBase * const getExtensions() { return _extensions; }
+
+	/**
+	 * Test for object alignment
+	 *
+	 * @param pointer pointer to test
+	 * @return true if pointer is object aligned
+	 */
+	bool isObjectAligned(void *pointer) { return 0 == ((uintptr_t)pointer & (_objectAlignmentInBytes - 1)); }
+
+	/**
+	 * Adjust to object size
+	 *
+	 * @param size to be adjusted
+	 * @return adjusted size
+	 */
+	uintptr_t alignToObjectSize(uintptr_t size) { return _extensions->objectModel.adjustSizeInBytes(size); }
 
 	/**
 	 * Controller delegates backout and remembered set to subclass

@@ -2458,7 +2458,7 @@ MM_Scavenger::scavengeRememberedSetOverflow(MM_EnvironmentStandard *env)
 			if (!_extensions->isEvacuatorEnabled()) {
 				scavengeRememberedObject(env, objectPtr, NULL);
 			} else {
-				env->getEvacuator()->evacuateRememberedObjectReferents(objectPtr);
+				env->getEvacuator()->evacuateRememberedObject(objectPtr);
 			}
 		}
 
@@ -2757,7 +2757,7 @@ MM_Scavenger::scavengeRememberedSetList(MM_EnvironmentStandard *env)
 				*slotPtr = (omrobjectptr_t)((uintptr_t)*slotPtr | DEFERRED_RS_REMOVE_FLAG);
 
 				/* Evacuator does not split arrays when evacuating slots from remembered pointer arrays so the ersult is immediate */
-				bool shouldBeRemembered = _extensions->isEvacuatorEnabled() ? env->getEvacuator()->evacuateRememberedObjectReferents(objectPtr) : scavengeRememberedObject(env, objectPtr, slotPtr);
+				bool shouldBeRemembered = _extensions->isEvacuatorEnabled() ? env->getEvacuator()->evacuateRememberedObject(objectPtr) : scavengeRememberedObject(env, objectPtr, slotPtr);
 				/* Update remembered state for this tenured object -- if still remembered we can clear removal flag here */
 				if (shouldBeRemembered || isRememberedThreadReference(env, objectPtr)) {
 					/* We want to retain this object in the remembered set so clear the flag for removal. */

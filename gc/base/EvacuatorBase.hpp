@@ -23,7 +23,7 @@
 #ifndef EVACUATORBASE_HPP_
 #define EVACUATORBASE_HPP_
 
-#define EVACUATOR_DEBUG
+#undef EVACUATOR_DEBUG
 #undef EVACUATOR_DEBUG_ALWAYS
 
 #if defined(EVACUATOR_DEBUG)
@@ -45,6 +45,7 @@
 #define EVACUATOR_DEBUG_POISON_DISCARD 512
 #define EVACUATOR_DEBUG_BACKOUT 1024
 #define EVACUATOR_DEBUG_DELEGATE 2048
+#define EVACUATOR_DEBUG_HEAPCHECK 4096
 
 /* default debug flags */
 #define EVACUATOR_DEBUG_DEFAULT_FLAGS (0)
@@ -181,6 +182,7 @@ public:
 	MMINLINE bool isDebugAllocate() { return isDebugFlagSet(EVACUATOR_DEBUG_ALLOCATE); }
 	MMINLINE bool isDebugBackout() { return isDebugFlagSet(EVACUATOR_DEBUG_BACKOUT); }
 	MMINLINE bool isDebugDelegate() { return isDebugFlagSet(EVACUATOR_DEBUG_DELEGATE); }
+	MMINLINE bool isDebugHeapCheck() { return isDebugFlagSet(EVACUATOR_DEBUG_HEAPCHECK); }
 #else
 	MMINLINE void setDebugFlags(uintptr_t debugFlags, uintptr_t debugCycle, uintptr_t debugEpoch, uintptr_t debugTrace = 0) { }
 	MMINLINE void setDebugFlags(uint64_t debugFlags = 0) { }
@@ -201,6 +203,7 @@ public:
 	MMINLINE bool isDebugAllocate() { return false; }
 	MMINLINE bool isDebugBackout() { return false; }
 	MMINLINE bool isDebugDelegate() { return false; }
+	MMINLINE bool isDebugHeapCheck() { return false; }
 #endif /* defined(EVACUATOR_DEBUG) */
 
 	MM_EvacuatorBase()

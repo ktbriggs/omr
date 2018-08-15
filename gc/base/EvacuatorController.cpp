@@ -349,8 +349,9 @@ MM_EvacuatorController::unbindWorker(MM_EnvironmentStandard *env)
 		printEvacuatorBitmap(env, "; resuming", _resumingEvacuatorBitmap);
 		omrtty_printf("; flags:%llx\n", _evacuatorFlags);
 	}
-	if (_debugger.isDebugRemembered() && isEvacuatorBitmapEmpty(_boundEvacuatorBitmap)) {
-		evacuator->scanTenureForForgottenObjects();
+	if (_debugger.isDebugHeapCheck() && isEvacuatorBitmapEmpty(_boundEvacuatorBitmap)) {
+		evacuator->checkSurvivor();
+		evacuator->checkTenure();
 	}
 #endif /* defined(EVACUATOR_DEBUG) */
 
