@@ -24,7 +24,7 @@
 #define EVACUATORBASE_HPP_
 
 #undef EVACUATOR_DEBUG
-#undef EVACUATOR_DEBUG_ALWAYS
+#define EVACUATOR_DEBUG_ALWAYS
 
 #if defined(EVACUATOR_DEBUG)
 #include "omrgcconsts.h"

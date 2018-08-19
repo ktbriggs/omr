@@ -257,6 +257,8 @@ MM_Evacuator::evacuateRootObject(MM_ForwardedHeader *forwardedHeader)
 						work->base = (omrobjectptr_t)effectiveCopyspace->rebase(&work->length);
 						addWork(work);
 					}
+					/* adjust work release threshold as work volume increases during root and remembered set and clearing phases */
+					_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(getVolumeOfWork());
 					/* prepare the large object copyspace for next use */
 					_largeCopyspace.resetCopyspace();
 				} else if (effectiveCopyspace->getWorkSize() >= _workReleaseThreshold) {
@@ -264,6 +266,8 @@ MM_Evacuator::evacuateRootObject(MM_ForwardedHeader *forwardedHeader)
 					MM_EvacuatorWorkPacket *work = _freeList.next();
 					work->base = (omrobjectptr_t)effectiveCopyspace->rebase(&work->length);
 					addWork(work);
+					/* adjust work release threshold as work volume increases during root and remembered set and clearing phases */
+					_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(getVolumeOfWork());
 				}
 			} else if (effectiveCopyspace == &_largeCopyspace) {
 				/* object copied by other thread */
@@ -637,6 +641,9 @@ MM_Evacuator::scanComplete()
 	Debug_MM_true(isAbortedCycle() || (0 == _copyspace[tenure].getWorkSize()));
 #endif /* defined(EVACUATOR_DEBUG) */
 
+	/* reset stack  */
+	_stackLimit = isBreadthFirst() ? (_stackBottom + 1) : _stackCeiling;
+
 	/* all done heap scan */
 	Debug_MM_true(!_completedScan);
 	_completedScan = true;
@@ -890,13 +897,10 @@ MM_Evacuator::setStackLimit()
 			_stackLimit = _stackBottom + 1;
 
 			/* continue copying inside stack until a slot must be pushed then flush() until stall clears */
-			return false;
+			return true;
 
 		} else if (!areAnyEvacuatorsStalled && (_stackLimit < _stackCeiling)) {
-			/* recalculate work release threshold to reflect worklist volume after stall condition clears */
-			_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(getVolumeOfWork());
-		
-			/* restore the stack limit */
+			/* restore the stack limit but defer recalculation of work release threshold until stack pops to empty */
 			_stackLimit = _stackCeiling;
 			
 			/* return true to signal flush() to stop scanning frame */
@@ -1379,8 +1383,6 @@ MM_Evacuator::addWork(MM_EvacuatorWorkPacket *work)
 	omrthread_monitor_exit(_mutex);
 
 	_controller->notifyOfWork();
-
-	_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(getVolumeOfWork());
 }
 
 MM_EvacuatorWorkPacket *
