@@ -637,6 +637,9 @@ MM_Evacuator::scanComplete()
 	Debug_MM_true(isAbortedCycle() || (0 == _copyspace[tenure].getWorkSize()));
 #endif /* defined(EVACUATOR_DEBUG) */
 
+	/* reset stack  */
+	_stackLimit = isBreadthFirst() ? (_stackBottom + 1) : _stackCeiling;
+
 	/* all done heap scan */
 	Debug_MM_true(!_completedScan);
 	_completedScan = true;
@@ -890,7 +893,7 @@ MM_Evacuator::setStackLimit()
 			_stackLimit = _stackBottom + 1;
 
 			/* continue copying inside stack until a slot must be pushed then flush() until stall clears */
-			return false;
+			return true;
 
 		} else if (!areAnyEvacuatorsStalled && (_stackLimit < _stackCeiling)) {
 			/* recalculate work release threshold to reflect worklist volume after stall condition clears */
