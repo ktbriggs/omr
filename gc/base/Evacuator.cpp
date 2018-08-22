@@ -64,7 +64,7 @@ bool
 MM_Evacuator::initialize()
 {
 	/* initialize the evacuator mutex */
-	if (0 != omrthread_monitor_init_with_name(&_mutex, 0, "MM_Evacuator::_mutex")) {
+	if (0 != omrthread_monitor_init_with_name(&_mutex, J9THREAD_MONITOR_DISABLE_SPINNING, "MM_Evacuator::_mutex")) {
 		return false;
 	}
 
@@ -892,17 +892,15 @@ MM_Evacuator::setStackLimit()
 			/* limit stack to force flushing until stalled evacuator condition clears */
 			_stackLimit = _stackBottom + 1;
 
-			/* continue copying inside stack until a slot must be pushed then flush() until stall clears */
 			return true;
 
 		} else if (!areAnyEvacuatorsStalled && (_stackLimit < _stackCeiling)) {
 			/* recalculate work release threshold to reflect worklist volume after stall condition clears */
 			_workReleaseThreshold = _controller->calculateOptimalWorkPacketSize(getVolumeOfWork());
 		
-			/* restore the stack limit */
+			/* restore the stack limit to allow inside copying */
 			_stackLimit = _stackCeiling;
 			
-			/* return true to signal flush() to stop scanning frame */
 			return true;
 		}
 	}

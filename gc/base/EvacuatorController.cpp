@@ -75,12 +75,12 @@ MM_EvacuatorController::initialize(MM_EnvironmentBase *env)
 	Assert_MM_true(!_extensions->isEvacuatorEnabled() || !_extensions->isConcurrentScavengerEnabled());
 
 	if (_extensions->isEvacuatorEnabled()) {
-		if (0 != omrthread_monitor_init_with_name(&_controllerMutex, 0, "MM_EvacuatorController::_controllerMutex")) {
+		if (0 != omrthread_monitor_init_with_name(&_controllerMutex, J9THREAD_MONITOR_DISABLE_SPINNING, "MM_EvacuatorController::_controllerMutex")) {
 			_controllerMutex = NULL;
 			return false;
 		}
 
-		if (0 != omrthread_monitor_init_with_name(&_reporterMutex, 0, "MM_EvacuatorController::_reporterMutex")) {
+		if (0 != omrthread_monitor_init_with_name(&_reporterMutex, J9THREAD_MONITOR_DISABLE_SPINNING, "MM_EvacuatorController::_reporterMutex")) {
 			omrthread_monitor_destroy(_controllerMutex);
 			_controllerMutex = NULL;
 			_reporterMutex = NULL;
