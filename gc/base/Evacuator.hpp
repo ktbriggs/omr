@@ -36,9 +36,11 @@
 #include "EvacuatorWorklist.hpp"
 #include "EvacuatorScanspace.hpp"
 #include "EvacuatorWhitelist.hpp"
+#include "ForwardedHeader.hpp"
 #include "GCExtensionsBase.hpp"
 #include "ObjectModel.hpp"
 #include "ParallelTask.hpp"
+#include "SlotObject.hpp"
 
 class GC_ObjectScanner;
 class GC_SlotObject;
@@ -181,17 +183,23 @@ public:
 	 */
 	void tearDown();
 
-	MMINLINE uintptr_t getWorkerIndex() { return _workerIndex; }
-	MMINLINE MM_EnvironmentStandard *getEnvironment() { return _env; }
-	MMINLINE MM_EvacuatorDelegate *getDelegate() { return &_delegate; }
+	uintptr_t getWorkerIndex() { return _workerIndex; }
+	MM_EnvironmentStandard *getEnvironment() { return _env; }
+	MM_EvacuatorDelegate *getDelegate() { return &_delegate; }
 
-	MMINLINE bool isInEvacuate(void *address) { return (_heapBounds[evacuate][0] <= (uint8_t *)address) && ((uint8_t *)address < _heapBounds[evacuate][1]); }
-	MMINLINE bool isInSurvivor(void *address) { return (_heapBounds[survivor][0] <= (uint8_t *)address) && ((uint8_t *)address < _heapBounds[survivor][1]); }
-	MMINLINE bool isInTenure(void *address) { return _env->getExtensions()->isOld((omrobjectptr_t)address); }
+	bool isInEvacuate(void *address) { return (_heapBounds[evacuate][0] <= (uint8_t *)address) && ((uint8_t *)address < _heapBounds[evacuate][1]); }
+	bool isInSurvivor(void *address) { return (_heapBounds[survivor][0] <= (uint8_t *)address) && ((uint8_t *)address < _heapBounds[survivor][1]); }
+	bool isInTenure(void *address) { return _env->getExtensions()->isOld((omrobjectptr_t)address); }
 
 	uintptr_t flushWhitespace(EvacuationRegion region);
 
-	MMINLINE EvacuationRegion
+	/**
+	 * Get the heap region (survivor|tenure|evacuate) containing an address
+	 *
+	 * @param address a putative heap address
+	 * @return heap region or unreachable if address not in heap
+	 */
+	EvacuationRegion
 	getEvacuationRegion(void *address)
 	{
 		if (isInSurvivor(address)) {
@@ -206,7 +214,13 @@ public:
 		return unreachable;
 	}
 
-	MMINLINE EvacuationRegion
+	/**
+	 * Get the complementary outside region (survivor|tenure)
+	 *
+	 * @param thisOutsideRegion the outside region to complement
+	 * @return complementary outside region
+	 */
+	EvacuationRegion
 	otherOutsideRegion(EvacuationRegion thisOutsideRegion)
 	{
 		if ((intptr_t)survivor == (1 - (intptr_t)thisOutsideRegion)) {
@@ -217,11 +231,48 @@ public:
 	}
 
 	/**
-	 * Get the number of bytes allocated discarded during the gc cycle (micro-fragmentation) and the number flushed
-	 * at the end (macro-fragmentation).
+	 * Copy and forward root object given address of referring slot
+	 *
+	 * @param slotPtr address of referring slot
+	 * @param breadthFirst copy object without recursing into dependent referents
+	 * @return true if the root object was copied to new space (not tenured), false otherwise
 	 */
-	MMINLINE uint64_t getDiscarded() { return _whiteList[survivor].getDiscarded() + _whiteList[tenure].getDiscarded(); }
-	MMINLINE uint64_t getFlushed() { return _whiteList[survivor].getFlushed() + _whiteList[tenure].getFlushed(); }
+	bool
+	evacuateRootObject(volatile omrobjectptr_t *slotPtr, bool breadthFirst = false)
+	{
+		omrobjectptr_t object = *slotPtr;
+		if (isInEvacuate(object)) {
+			/* slot object must be evacuated -- determine before and after object size */
+			MM_ForwardedHeader forwardedHeader(object);
+			object = evacuateRootObject(&forwardedHeader, breadthFirst);
+			Debug_MM_true(NULL != object);
+			*slotPtr = object;
+		}
+		/* failure to evacuate must be reported as object in survivor space to maintain remembered set integrity */
+		return isInSurvivor(object) || isInEvacuate(object);
+	}
+
+	/**
+	 * Copy and forward root object given slot object encapsulating address of referring slot
+	 *
+	 * @param slotObject pointer to slot object encapsulating address of referring slot
+	 * @param breadthFirst copy object without recursing into dependent referents
+	 * @return true if the root object was copied to new space (not tenured), false otherwise
+	 */
+	bool
+	evacuateRootObject(GC_SlotObject* slotObject, bool breadthFirst = false)
+	{
+		omrobjectptr_t object = slotObject->readReferenceFromSlot();
+		if (isInEvacuate(object)) {
+			/* slot object must be evacuated -- determine before and after object size */
+			MM_ForwardedHeader forwardedHeader(object);
+			object = evacuateRootObject(&forwardedHeader, breadthFirst);
+			Debug_MM_true(NULL != object);
+			slotObject->writeReferenceToSlot(object);
+		}
+		/* failure to evacuate must be reported as object in survivor space to maintain remembered set integrity */
+		return isInSurvivor(object) || isInEvacuate(object);
+	}
 
 	/**
 	 * Main evacuation method driven by all gc slave threads during a nursery collection.
@@ -263,25 +314,10 @@ public:
 	 * Copy and forward root object given a forwarding header obtained from the object
 	 *
 	 * @param forwardedHeader pointer to forwarding header obtained from the object
+	 * @param breadthFirst copy object without recursing into dependent referents
 	 * @return address in survivor or tenure space that object was forwarded to
 	 */
-	omrobjectptr_t evacuateRootObject(MM_ForwardedHeader *forwardedHeader);
-
-	/**
-	 * Copy and forward root object given address of referring slot
-	 *
-	 * @param slotPtr address of referring slot
-	 * @return true if the root object was copied to new space (not tenured), false otherwise
-	 */
-	bool evacuateRootObject(volatile omrobjectptr_t *slotPtr);
-
-	/**
-	 * Copy and forward root object given slot object encapsulating address of referring slot
-	 *
-	 * @param slotObject pointer to slot object encapsulating address of referring slot
-	 * @return true if the root object was copied to new space (not tenured), false otherwise
-	 */
-	bool evacuateRootObject(GC_SlotObject* slotObject);
+	omrobjectptr_t evacuateRootObject(MM_ForwardedHeader *forwardedHeader, bool breadthFirst = false);
 
 	/**
 	 * Copy and forward root object from mutator stack slot given address of referring slot.
@@ -343,6 +379,16 @@ public:
 	 * @param[in] env worker thread environment to unbind from
 	 */
 	void unbindWorkerThread(MM_EnvironmentStandard *env);
+
+	/**
+	 * Get the number of allocated bytes discarded during the gc cycle (micro-fragmentation).
+	 */
+	uint64_t getDiscarded() { return _whiteList[survivor].getDiscarded() + _whiteList[tenure].getDiscarded(); }
+
+	/**
+	 * Get the number of allocated bytes flushed at the end of the gc cycle (macro-fragmentation).
+	 */
+	uint64_t getFlushed() { return _whiteList[survivor].getFlushed() + _whiteList[tenure].getFlushed(); }
 
 #if defined(EVACUATOR_DEBUG)
 	void checkSurvivor();

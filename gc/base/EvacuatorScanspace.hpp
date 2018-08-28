@@ -100,6 +100,11 @@ public:
 	GC_ObjectScanner *getActiveObjectScanner() { return _objectScanner; }
 
 	/**
+	 * Advance the scan pointer to new base pointer.
+	 */
+	void advanceScanHead() { _scan = _base; }
+
+	/**
 	 * Advance the scan pointer to next unscanned object and drop active object scanner.
 	 *
 	 * @param scannedBytes number of bytes scanned (size of scanned object)
@@ -224,7 +229,10 @@ public:
 	bool isSplitArraySegment() { return isSplitArrayFlag == (_flags & (uintptr_t)isSplitArrayFlag); }
 
 	/**
-	 * Pull work from an outside copyspace leaving it empty of work and retaining whitespace
+	 * Pull work from an outside copyspace leaving it empty of work and retaining whitespace. If the
+	 * source copyspace is a scanspace then this will leaved this scanspace in an inconsistent state
+	 * (_scan < _base) until advanceScanHead() is called to reset the scan head on the source
+	 * scanspace.
 	 *
 	 * @param fromspace the source copyspace
 	 */
