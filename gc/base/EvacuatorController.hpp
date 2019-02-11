@@ -433,6 +433,14 @@ public:
 	 */
 	MMINLINE bool hasFulfilledWorkQuota(uint64_t volumeOfWork) { return ((uint64_t)_minimumWorkspaceSize * (uint64_t)_minimumWorkQuanta) < volumeOfWork; }
 
+
+	/**
+	 * Evacuators abandon large whitespace remainders from copyspaces if overflow exceeds this limit
+	 *
+	 * @return the maximum number of bytes that may overflow a copyspace with shortening whitespace remainder
+	 */
+	MMINLINE uintptr_t getMaximumCopyspaceOverflow() { return (MM_EvacuatorBase::max_large_object_overflow_quanta * _minimumWorkspaceSize); }
+
 	/**
 	 * Evacuator will notify controller of work whenever it adds to its own worklist and in the presence
 	 * of other stalled evacuators. Controller will notify a stalled evacuator if calling evacuator volume

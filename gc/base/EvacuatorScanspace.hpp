@@ -306,6 +306,8 @@ public:
 #endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 	}
 
+	bool isClear() { return (_scan == _copy) && (_copy == _end); }
+
 #if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 	/**
 	 * Bump activation count

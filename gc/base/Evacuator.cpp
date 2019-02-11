@@ -827,16 +827,16 @@ MM_Evacuator::clear()
 
 		/* find next empty frame that can receive whitespace from the scan frame */
 		EvacuationRegion scanRegion = getEvacuationRegion(scan->getBase());
-		MM_EvacuatorScanspace * const whiteFrame = nextStackFrame(scanRegion, (isBreadthFirst ? _stackBottom : (scan + 1)));
+		_whiteStackFrame[scanRegion] = nextStackFrame(scanRegion, (isBreadthFirst ? _stackBottom : (scan + 1)));
 
-		Debug_MM_true(NULL != whiteFrame);
-		Debug_MM_true(0 == whiteFrame->getWorkSize());
-		Debug_MM_true(0 == whiteFrame->getWhiteSize());
+		Debug_MM_true((NULL != _whiteStackFrame[scanRegion]) && whiteStackFrame[scanRegion]->isClear());
 
 		/* pull whitespace into empty frame from scan frame */
-		whiteFrame->pullWhitespace(scan);
-		_whiteStackFrame[scanRegion] = whiteFrame;
+		_whiteStackFrame[scanRegion]->pullWhitespace(scan);
 	}
+
+	/* scanspace is clear and ready to pull work */
+	Debug_MM_true(scan->isClear());
 
 	return scan;
 }
@@ -1230,7 +1230,7 @@ MM_Evacuator::reserveInsideCopyspace(const EvacuationRegion evacuationRegion, co
 	Debug_MM_true(slotObjectSizeAfterCopy > whiteSize);
 
 	/* refresh stack whitespace only if remainder is discardable */
-	if (MM_EvacuatorBase::max_scanspace_remainder >= whiteSize) {
+	if ((MM_EvacuatorBase::max_scanspace_remainder >= whiteSize) || (_whiteList[evacuationRegion].top() >= slotObjectSizeAfterCopy)) {
 
 		/* find next frame that can receive whitespace for evacuation region */
 		MM_EvacuatorScanspace *nextFrame = nextStackFrame(evacuationRegion, _scanStackFrame + 1);
@@ -1411,7 +1411,20 @@ MM_Evacuator::copyOutside(EvacuationRegion evacuationRegion, MM_ForwardedHeader 
 	return forwardingAddress;
 }
 
-uintptr_t MM_Evacuator::copyspaceOverflowThreshold() { return (_controller->_minimumWorkspaceSize * MM_EvacuatorBase::max_large_object_overflow_quanta); }
+bool
+MM_Evacuator::shouldRefreshCopyspace(EvacuationRegion evacuationRegion, uintptr_t copyspaceRemainder)
+{
+	if (MM_EvacuatorBase::max_copyspace_remainder >= copyspaceRemainder) {
+
+		return true;
+
+	} else if (_controller->getMaximumCopyspaceOverflow() < _copyspaceOverflow[evacuationRegion]) {
+
+		return true;
+	}
+
+	return false;
+}
 
 MM_EvacuatorCopyspace *
 MM_Evacuator::reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, const uintptr_t slotObjectSizeAfterCopy, bool useLargeCopyspace)
@@ -1436,11 +1449,13 @@ MM_Evacuator::reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, const 
 				/* use outside copyspace for preferred region if object will fit */
 				return &_copyspace[*evacuationRegion];
 
-			} else if ((MM_EvacuatorBase::max_copyspace_remainder >= copyspaceRemainder) || (copyspaceOverflowThreshold() < _copyspaceOverflow[*evacuationRegion])) {
+			} else if (shouldRefreshCopyspace(*evacuationRegion, copyspaceRemainder)) {
 
-				/* refresh whitespace for copyspace and truncate remainder to whitelist */
+				/* refresh whitespace for copyspace */
 				whitespace = _controller->getWhitespace(this, *evacuationRegion, slotObjectSizeAfterCopy);
 				if (NULL != whitespace) {
+
+					/* clear copyspace overflow condition and break to set whitespace into copyspace */
 					_copyspaceOverflow[*evacuationRegion] = 0;
 					setFlushCondition(copyspace_overflow, false);
 					break;
@@ -1449,14 +1464,17 @@ MM_Evacuator::reserveOutsideCopyspace(EvacuationRegion *evacuationRegion, const 
 
 			/* no available whitespace in copyspace so update or set up large object overflow to redirect small objects for region from inside to outside copy */
 			if (testFlushCondition(copyspace_overflow)) {
+
 				/* (slot object size after copy) > (copyspace remainder) > (minimum whitespace discard threshold) */
 				_copyspaceOverflow[*evacuationRegion] += slotObjectSizeAfterCopy;
+
 			} else {
+
 				/* start counting size of objects overflowing copyspace */
 				setFlushCondition(copyspace_overflow, true);
 			}
 
-			/* try injecting into stack whitespace at or below current scan frame */
+			/* try injecting into stack whitespace */
 			MM_EvacuatorScanspace * const whiteFrame = _whiteStackFrame[*evacuationRegion];
 			if ((NULL != whiteFrame) && (whiteFrame < _stackLimit) && (slotObjectSizeAfterCopy <= whiteFrame->getWhiteSize())) {
 				return whiteFrame;
@@ -1685,12 +1703,16 @@ MM_Evacuator::splitPointerArrayWork(omrobjectptr_t pointerArray)
 	/* record 1-based array offsets to mark split array work packets */
 	uintptr_t offset = 1;
 	while (0 < segments) {
+
 		/* add each array segment as a work packet */
 		MM_EvacuatorWorkPacket* work = _freeList.next();
+
 		work->base = pointerArray;
 		work->offset = offset;
 		work->length = elementsThisSegment;
+
 		_workList.add(work);
+
 		offset += elementsThisSegment;
 		elementsThisSegment = elementsPerSegment;
 		segments -= 1;
