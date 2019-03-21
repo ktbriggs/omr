@@ -357,9 +357,7 @@ MM_Scavenger::collectorShutdown(MM_GCExtensionsBase* extensions)
 	}
 #endif /* OMR_GC_CONCURRENT_SCAVENGER */
 
-	if (_extensions->isEvacuatorEnabled()) {
-		MM_EvacuatorController::collectorShutdown(extensions);
-	}
+	MM_EvacuatorController::collectorShutdown(extensions);
 }
 
 /****************************************
@@ -4542,9 +4540,7 @@ MM_Scavenger::globalCollectionStart(MM_EnvironmentBase *env)
 	scavengerStats->_semiSpaceAllocBytesAcumulation += heapStatsSemiSpace._allocBytes;
 	scavengerStats->_tenureSpaceAllocBytesAcumulation += heapStatsTenureSpace._allocBytes;
 
-	if (_extensions->isEvacuatorEnabled()) {
-		MM_EvacuatorController::flushTenureWhitespace(false);
-	}
+	MM_EvacuatorController::flushTenureWhitespace(false);
 }
 
 void

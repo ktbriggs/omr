@@ -172,19 +172,17 @@ MM_EvacuatorController::collectorStartup(MM_GCExtensionsBase* extensions)
 void
 MM_EvacuatorController::collectorShutdown(MM_GCExtensionsBase* extensions)
 {
-	if (extensions->isEvacuatorEnabled()) {
-		flushTenureWhitespace(true);
-	}
+	flushTenureWhitespace(true);
 
 #if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 #if defined(EVACUATOR_DEBUG)
-		if (_debugger.isDebugEnd()) {
+	if (_debugger.isDebugEnd()) {
 #endif /* defined(EVACUATOR_DEBUG) */
-			OMRPORT_ACCESS_FROM_OMRVM(_omrVM);
-			uint64_t collectorElapsedMicros = omrtime_hires_delta(_collectorStartTime, omrtime_hires_clock(), OMRPORT_TIME_DELTA_IN_MICROSECONDS);
-			omrtty_printf("%5lu      :  shutdown; elapsed:%llu\n", _history.epoch()->gc, collectorElapsedMicros);
+		OMRPORT_ACCESS_FROM_OMRVM(_omrVM);
+		uint64_t collectorElapsedMicros = omrtime_hires_delta(_collectorStartTime, omrtime_hires_clock(), OMRPORT_TIME_DELTA_IN_MICROSECONDS);
+		omrtty_printf("%5lu      :  shutdown; elapsed:%llu\n", _history.epoch()->gc, collectorElapsedMicros);
 #if defined(EVACUATOR_DEBUG)
-		}
+	}
 #endif /* defined(EVACUATOR_DEBUG) */
 #endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 }
@@ -208,19 +206,19 @@ MM_EvacuatorController::flushTenureWhitespace(bool shutdown)
 #endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
 			}
 		}
+	}
 
 #if defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS)
 #if defined(EVACUATOR_DEBUG)
-		if (_debugger.isDebugEnd()) {
+	if (_debugger.isDebugEnd()) {
 #endif /* defined(EVACUATOR_DEBUG) */
-			OMRPORT_ACCESS_FROM_OMRVM(_omrVM);
-			omrtty_printf("%5lu      :%10s; tenure; discarded:%lx; flushed:%lx; recycled:%lx\n", _history.epoch()->gc,
-					(shutdown ? "finalize" : "global gc"), flushed, discarded, recycled);
+		OMRPORT_ACCESS_FROM_OMRVM(_omrVM);
+		omrtty_printf("%5lu      :%10s; tenure; discarded:%lx; flushed:%lx; recycled:%lx\n", _history.epoch()->gc,
+				(shutdown ? "finalize" : "global gc"), flushed, discarded, recycled);
 #if defined(EVACUATOR_DEBUG)
-		}
+	}
 #endif /* defined(EVACUATOR_DEBUG) */
 #endif /* defined(EVACUATOR_DEBUG) || defined(EVACUATOR_DEBUG_ALWAYS) */
-	}
 }
 
 void
